@@ -30,7 +30,7 @@ import {
 } from 'lucide-react';
 
 // Supabase integration (best-effort insert of scans and job descriptions)
-import { insertScanRecord, insertJobDescriptionRecord } from './src/services/supabaseClient';
+import { insertScanRecord, insertJobDescriptionRecord, supabase } from './src/services/supabaseClient';
 
 // --- Types & Constants ---
 
@@ -743,6 +743,38 @@ const App = () => {
   const executeAnalysis = async () => {
     if (!pendingAnalysis) return;
     setIsPrivacyOpen(false);
+
+    // Double-check: ensure logged-in user's email is verified before kicking off AI work
+    if (!isGuest && user) {
+      try {
+        let confirmed = true;
+        if (supabase && supabase.auth) {
+          if (typeof supabase.auth.getUser === 'function') {
+            const { data, error } = await supabase.auth.getUser();
+            if (error) console.error('Supabase getUser error:', error);
+            const current = data?.user || (data as any);
+            if (current && ('email_confirmed_at' in current)) confirmed = !!current.email_confirmed_at;
+          } else if (typeof supabase.auth.getSession === 'function') {
+            const { data, error } = await supabase.auth.getSession();
+            if (error) console.error('Supabase getSession error:', error);
+            const current = data?.session?.user;
+            if (current && ('email_confirmed_at' in current)) confirmed = !!current.email_confirmed_at;
+          } else if (typeof (supabase.auth.user) === 'function') {
+            const current = (supabase.auth.user as any)();
+            if (current && ('email_confirmed_at' in current)) confirmed = !!current.email_confirmed_at;
+          }
+        }
+        if (!confirmed) {
+          alert('Please verify your email to continue.');
+          setPage('dashboard');
+          return;
+        }
+      } catch (err) {
+        console.error('Error verifying user email status before analysis:', err);
+        // Fail open and proceed if the check encounters unexpected errors
+      }
+    }
+
     setPage('processing');
 
     try {
@@ -883,11 +915,51 @@ const App = () => {
         {page === 'upload' && (
           <UploadSection 
             role={role} user={user} isGuest={isGuest} onTriggerUpgrade={triggerUpgrade}
-            onAnalyze={(jd: File | null, resumes: File[], jdText?: string) => {
+            onAnalyze={async (jd: File | null, resumes: File[], jdText?: string) => {
+              // Block upgrade limit check first as before
               if ((isGuest && guestScans.length >= GUEST_LIMIT) || (!isGuest && user?.plan !== 'pro' && user!.scans.length >= GUEST_LIMIT)) { 
                   setIsUpgradeOpen(true); 
                   return; 
               }
+
+              // For logged-in users, check email verification status via Supabase Auth BEFORE allowing analysis
+              if (!isGuest && user) {
+                try {
+                  let confirmed = true; // default to allow
+                  if (supabase && supabase.auth) {
+                    if (typeof supabase.auth.getUser === 'function') {
+                      const { data, error } = await supabase.auth.getUser();
+                      if (error) console.error('Supabase getUser error:', error);
+                      const current = data?.user || (data as any);
+                      if (current && ('email_confirmed_at' in current)) {
+                        confirmed = !!current.email_confirmed_at;
+                      }
+                    } else if (typeof supabase.auth.getSession === 'function') {
+                      const { data, error } = await supabase.auth.getSession();
+                      if (error) console.error('Supabase getSession error:', error);
+                      const current = data?.session?.user;
+                      if (current && ('email_confirmed_at' in current)) {
+                        confirmed = !!current.email_confirmed_at;
+                      }
+                    } else if (typeof (supabase.auth.user) === 'function') {
+                      const current = (supabase.auth.user as any)();
+                      if (current && ('email_confirmed_at' in current)) {
+                        confirmed = !!current.email_confirmed_at;
+                      }
+                    }
+                  }
+
+                  if (!confirmed) {
+                    alert('Please verify your email to continue.');
+                    return;
+                  }
+                } catch (err) {
+                  console.error('Error verifying user email status:', err);
+                  // Fail open: allow the action if verification check fails for unexpected reasons
+                }
+              }
+
+              // If checks pass, proceed to set pending analysis and open privacy modal
               setPendingAnalysis({ jd, resumes, jdText }); setIsPrivacyOpen(true);
             }} 
           />
