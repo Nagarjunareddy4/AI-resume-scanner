@@ -413,6 +413,11 @@ const Dashboard = ({ user, scans, isGuest, role, setRole, onNewScan, onViewScan,
 const UploadSection = ({ role, user, isGuest, onAnalyze, onTriggerUpgrade }: any) => {
   const [jdFile, setJdFile] = useState<File | null>(null);
   const [jdText, setJdText] = useState<string>("");
+  // Mode controls whether we show the typed JD textarea or the upload control. Default to 'type'.
+  const [jdMode, setJdMode] = useState<'type' | 'upload'>('type');
+  // If a JD file is set, prefer upload mode; if typed JD is present prefer type mode.
+  useEffect(() => { if (jdFile && jdMode !== 'upload') { setJdMode('upload'); } }, [jdFile]);
+  useEffect(() => { if (jdText && jdText.trim() && jdMode !== 'type') { setJdMode('type'); } }, [jdText]);
   const [resumes, setResumes] = useState<File[]>([]);
   const [guestName, setGuestName] = useState("");
   const [error, setError] = useState("");
@@ -450,30 +455,57 @@ const UploadSection = ({ role, user, isGuest, onAnalyze, onTriggerUpgrade }: any
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
         <Card className="p-8 space-y-5 hover:border-blue-200 dark:hover:border-blue-900 transition-colors">
-          <h3 className="font-bold text-lg flex items-center gap-2"><Briefcase className="w-5 h-5 text-blue-600" /> Job Description</h3>
-          <div className={`p-10 border-2 border-dashed rounded-2xl flex flex-col items-center gap-4 transition-all duration-300 ${jdFile ? 'border-green-500 bg-green-50/50 dark:bg-green-900/10' : 'border-gray-200 dark:border-gray-800 hover:border-blue-400'}`}>
-            {/* Text input for JD - users can type/paste a job description. If both text and file are present, typed text takes precedence. */}
-            <textarea
-              placeholder="Paste or type the job description here (optional). If provided, this text will be used for analysis instead of uploaded JD file."
-              className="w-full px-4 py-3 rounded-xl border dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none transition-all shadow-sm"
-              value={jdText}
-              onChange={(e) => setJdText(e.target.value)}
-              rows={4}
-            />
-
-            {jdFile ? (
-              <div className="flex items-center gap-4 w-full p-4 bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-green-100">
-                <CheckCircle2 className="w-8 h-8 text-green-500" />
-                <span className="truncate flex-1 font-bold text-gray-800 dark:text-gray-200">{jdFile.name}</span>
-                <button onClick={() => setJdFile(null)} className="p-2 hover:bg-red-50 rounded-full text-gray-400 hover:text-red-500 transition-colors"><X className="w-5 h-5" /></button>
+          <div>
+            <h3 className="font-bold text-lg flex items-center gap-2"><Briefcase className="w-5 h-5 text-blue-600" /> Job Description</h3>
+            {/* Segmented control placed immediately below the title to feel integrated with the header. */}
+            <div className="mt-2">
+              <div role="tablist" aria-label="Job description input mode" className="inline-flex rounded-full border border-gray-200 dark:border-gray-800 overflow-hidden">
+                <button
+                  role="tab"
+                  aria-selected={jdMode === 'type'}
+                  onClick={() => { setJdMode('type'); setJdFile(null); }}
+                  className={`px-3 py-2 text-sm font-bold flex-1 text-center transition-colors focus:outline-none ${jdMode === 'type' ? 'bg-blue-50 dark:bg-blue-900/10 text-blue-600 shadow-sm' : 'text-gray-600 hover:text-gray-800 hover:border-transparent' } rounded-l-full`}
+                >
+                  Type JD
+                </button>
+                <button
+                  role="tab"
+                  aria-selected={jdMode === 'upload'}
+                  onClick={() => { setJdMode('upload'); setJdText(''); }}
+                  className={`px-3 py-2 text-sm font-bold flex-1 text-center transition-colors focus:outline-none ${jdMode === 'upload' ? 'bg-blue-50 dark:bg-blue-900/10 text-blue-600 shadow-sm' : 'text-gray-600 hover:text-gray-800 hover:border-transparent' } rounded-r-full`}
+                >
+                  Upload JD
+                </button>
               </div>
+            </div>
+          </div>
+
+          <div className={`p-10 border-2 border-dashed rounded-2xl flex flex-col items-center gap-4 transition-all duration-300 ${jdFile ? 'border-green-500 bg-green-50/50 dark:bg-green-900/10' : 'border-gray-200 dark:border-gray-800 hover:border-blue-400'}`}>
+            {/* Show only the selected input. Typed JD continues to take priority in processing logic. */}
+            {jdMode === 'type' ? (
+              <textarea
+                placeholder="Paste or type the job description here (optional). If provided, this text will be used for analysis instead of uploaded JD file."
+                className="w-full px-4 py-3 rounded-xl border dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none transition-all shadow-sm"
+                value={jdText}
+                onChange={(e) => setJdText(e.target.value)}
+                rows={4}
+              />
             ) : (
-              <>
-                <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-2xl"><Upload className="w-10 h-10 text-blue-600" /></div>
-                <input type="file" id="jd" className="hidden" onChange={(e) => setJdFile(e.target.files?.[0] || null)} accept=".pdf,.docx,.txt,.jpg,.jpeg,.png" />
-                <Button variant="outline" onClick={() => document.getElementById('jd')?.click()}>Upload JD</Button>
-                <p className="text-xs text-gray-400 font-medium">Supported: PDF, DOCX, TXT, or Image</p>
-              </>
+              // Upload mode
+              jdFile ? (
+                <div className="flex items-center gap-4 w-full p-4 bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-green-100">
+                  <CheckCircle2 className="w-8 h-8 text-green-500" />
+                  <span className="truncate flex-1 font-bold text-gray-800 dark:text-gray-200">{jdFile.name}</span>
+                  <button onClick={() => setJdFile(null)} className="p-2 hover:bg-red-50 rounded-full text-gray-400 hover:text-red-500 transition-colors"><X className="w-5 h-5" /></button>
+                </div>
+              ) : (
+                <>
+                  <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-2xl"><Upload className="w-10 h-10 text-blue-600" /></div>
+                  <input type="file" id="jd" className="hidden" onChange={(e) => setJdFile(e.target.files?.[0] || null)} accept=".pdf,.docx,.txt,.jpg,.jpeg,.png" />
+                  <Button variant="outline" onClick={() => document.getElementById('jd')?.click()}>Upload JD</Button>
+                  <p className="text-xs text-gray-400 font-medium">Supported: PDF, DOCX, TXT, or Image</p>
+                </>
+              )
             )}
           </div>
         </Card>
@@ -703,9 +735,24 @@ const App = () => {
   const [isGuest, setIsGuest] = useState(false);
   const [page, setPage] = useState<'dashboard' | 'upload' | 'processing' | 'results' | 'auth'>('auth');
   const [role, setRole] = useState<Role>('candidate');
+  // Theme handling: respect system preference unless user explicitly chooses a theme. Do NOT persist system preference on mount.
+  const [manualTheme, setManualTheme] = useState<'light' | 'dark' | null>(() => {
+    try {
+      const saved = localStorage.getItem('resuscan_theme');
+      return (saved === 'light' || saved === 'dark') ? (saved as 'light' | 'dark') : null;
+    } catch {
+      return null;
+    }
+  });
+
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
-    const saved = localStorage.getItem('resuscan_theme');
-    return saved ? (saved as any) : (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    try {
+      const saved = localStorage.getItem('resuscan_theme');
+      if (saved === 'light' || saved === 'dark') return saved as 'light' | 'dark';
+      return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    } catch {
+      return 'light';
+    }
   });
 
   const [guestScans, setGuestScans] = useState<ResumeScan[]>([]);
@@ -723,9 +770,24 @@ const App = () => {
   }, []);
 
   useEffect(() => {
+    // Update the DOM class to reflect effective theme (do NOT persist here).
     document.documentElement.className = theme;
-    localStorage.setItem('resuscan_theme', theme);
   }, [theme]);
+
+  // Listen to system/theme preference changes and follow them unless the user explicitly picked a theme.
+  useEffect(() => {
+    if (!window.matchMedia) return;
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = (e: MediaQueryListEvent) => {
+      if (!manualTheme) setTheme(e.matches ? 'dark' : 'light');
+    };
+    if (mq.addEventListener) mq.addEventListener('change', onChange);
+    else mq.addListener?.(onChange as any);
+    return () => {
+      if (mq.removeEventListener) mq.removeEventListener('change', onChange);
+      else mq.removeListener?.(onChange as any);
+    };
+  }, [manualTheme]);
 
   const handleLogout = () => { storage.setCurrentUser(null); setUser(null); setIsGuest(false); setPage('auth'); };
 
@@ -798,7 +860,14 @@ const App = () => {
       // Best-effort: persist the job description metadata and individual scan records to Supabase.
       // Any failures are logged to console but do NOT interrupt the user flow or UI.
       try {
-        await insertJobDescriptionRecord(pendingAnalysis.jd, jdText, user?.email || (isGuest ? 'guest' : null));
+        // Insert JD metadata if either typed JD text is present or a JD file was provided.
+        // Preserve priority: if typed text exists use it as the text_snippet, otherwise fall back to the uploaded filename.
+        const hasTypedJd = !!(pendingAnalysis.jdText && pendingAnalysis.jdText.trim());
+        const hasJdFile = !!pendingAnalysis.jd;
+        if (hasTypedJd || hasJdFile) {
+          const jdTextToInsert = hasTypedJd ? pendingAnalysis.jdText!.trim() : (pendingAnalysis.jd ? pendingAnalysis.jd.name : undefined);
+          await insertJobDescriptionRecord(pendingAnalysis.jd, jdTextToInsert as any, user?.email || (isGuest ? 'guest' : null));
+        }
       } catch (err) {
         console.error('Supabase JD insert failed:', err);
       }
@@ -882,7 +951,12 @@ const App = () => {
             <h1 className="text-xl font-black tracking-tight">{APP_NAME}</h1>
           </div>
           <div className="flex items-center gap-6">
-            <button onClick={() => setTheme(t => t === 'light' ? 'dark' : 'light')} className="p-2.5 rounded-full hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
+            <button onClick={() => {
+              const next = theme === 'light' ? 'dark' : 'light';
+              setTheme(next);
+              setManualTheme(next);
+              try { localStorage.setItem('resuscan_theme', next); } catch {};
+            }} className="p-2.5 rounded-full hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
               {theme === 'light' ? <Moon className="w-5 h-5 text-gray-600" /> : <Sun className="w-5 h-5 text-yellow-400" />}
             </button>
             <div className="flex items-center gap-4">

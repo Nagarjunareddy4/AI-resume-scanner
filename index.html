@@ -82,6 +82,24 @@
         }
       }
     </script>
+    <!-- Theme init script: sets document class BEFORE React mounts so there is no flash and system preference is respected unless user previously chose explicitly. -->
+    <script>
+      (function() {
+        try {
+          const KEY = 'resuscan_theme';
+          const saved = localStorage.getItem(KEY);
+          if (saved === 'light' || saved === 'dark') {
+            document.documentElement.classList.add(saved);
+          } else {
+            const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+            document.documentElement.classList.add(prefersDark ? 'dark' : 'light');
+          }
+        } catch (e) {
+          // Fail silently; avoid breaking the page during initialization
+          console.error('Theme init error', e);
+        }
+      })();
+    </script>
 <script type="importmap">
 {
   "imports": {

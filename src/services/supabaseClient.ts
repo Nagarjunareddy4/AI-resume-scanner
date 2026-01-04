@@ -9,17 +9,28 @@ const importMetaEnv: any = typeof import.meta !== 'undefined' ? (import.meta as 
 const SUPABASE_URL = (importMetaEnv ? (importMetaEnv.VITE_SUPABASE_URL || importMetaEnv.SUPABASE_URL) : undefined) || process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '';
 const SUPABASE_ANON_KEY = (importMetaEnv ? (importMetaEnv.VITE_SUPABASE_ANON_KEY || importMetaEnv.SUPABASE_ANON_KEY) : undefined) || process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '';
 
+// Flag that indicates at-runtime whether supabase keys exist. This is used to avoid silent failures in production
+export const isSupabaseConfigured = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
+
 // Initialize the Supabase client. If env keys are missing, provide a harmless no-op stub so
 // the rest of the app (and dev scripts) can import this module without throwing at import-time.
 let _supabase: any = null;
-if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
-  console.warn('Supabase keys missing; supabase client will operate in no-op mode. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to enable.');
-  // Minimal stub that supports the methods used in this file: from().insert() and from().select().order()
+if (!isSupabaseConfigured) {
+  console.error('[supabase] Missing configuration: please set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY at build time. Supabase operations will be skipped.');
+  // Better stub that also mirrors the auth surface used in the app so auth checks fail loudly and predictably.
   _supabase = {
+    auth: {
+      getUser: async () => ({ data: null, error: new Error('Supabase not configured') }),
+      getSession: async () => ({ data: null, error: new Error('Supabase not configured') }),
+      signInWithPassword: async (_creds: any) => ({ data: null, error: new Error('Supabase not configured') }),
+      signUp: async (_creds: any) => ({ data: null, error: new Error('Supabase not configured') }),
+      signOut: async () => ({ data: null, error: new Error('Supabase not configured') }),
+      // legacy compatibility
+      user: () => null
+    },
     from: (_table: string) => ({
       insert: async (_payload: any) => ({ data: null, error: new Error('Supabase not configured') }),
       select: (_cols?: any) => ({
-        // eq and is should return an object with order to mimic Supabase query chaining
         eq: (_col: string, _val: any) => ({ order: async (_c: string, _opts: any) => ({ data: null, error: new Error('Supabase not configured') }) }),
         is: (_col: string, _val: any) => ({ order: async (_c: string, _opts: any) => ({ data: null, error: new Error('Supabase not configured') }) }),
         order: async (_col: string, _opts: any) => ({ data: null, error: new Error('Supabase not configured') })
@@ -28,6 +39,7 @@ if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
   };
 } else {
   _supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  console.debug('[supabase] client initialized');
 }
 
 export const supabase = _supabase;
@@ -38,6 +50,7 @@ export const supabase = _supabase;
  * and does not affect the UI flow (to keep UX unchanged).
  */
 export async function insertScanRecord(scan: any, userEmail?: string | null) {
+  if (!isSupabaseConfigured) { console.error('[supabase] insertScanRecord skipped: Supabase not configured. Ensure VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are set.'); return; }
   try {
     // Map existing scan object into the `scans` table schema defined in DB.
     // Required columns per schema: user_email, owner_type ('guest'|'user'), mode ('candidate'|'recruiter'), match_score (integer), result (jsonb).
@@ -73,6 +86,7 @@ export async function insertScanRecord(scan: any, userEmail?: string | null) {
  * We store filename and optionally extracted text; this is a best-effort operation.
  */
 export async function insertJobDescriptionRecord(jdFile: File | null, jdText?: string, userEmail?: string | null) {
+  if (!isSupabaseConfigured) { console.error('[supabase] insertJobDescriptionRecord skipped: Supabase not configured. Ensure VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are set.'); return; }
   if (!jdFile && !jdText) return;
   try {
     const payload = {
@@ -96,6 +110,7 @@ export async function insertJobDescriptionRecord(jdFile: File | null, jdText?: s
  * Errors are logged to console only.
  */
 export async function fetchScansByUser(emailOrGuest?: string | null) {
+  if (!isSupabaseConfigured) { console.error('[supabase] fetchScansByUser skipped: Supabase not configured. Ensure VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are set.'); return null; }
   try {
     let query = supabase.from('scans').select('*');
     if (emailOrGuest === null) {
@@ -122,6 +137,7 @@ export async function fetchScansByUser(emailOrGuest?: string | null) {
  * Errors are logged to console only.
  */
 export async function fetchJobDescriptionsByUser(emailOrGuest?: string | null) {
+  if (!isSupabaseConfigured) { console.error('[supabase] fetchJobDescriptionsByUser skipped: Supabase not configured. Ensure VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are set.'); return null; }
   try {
     let query = supabase.from('job_descriptions').select('*');
     if (emailOrGuest === null) {
