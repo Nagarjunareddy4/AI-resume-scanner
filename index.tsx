@@ -200,6 +200,14 @@ const AuthPage = ({ onAuthSuccess, onGuestMode }: any) => {
   const [formData, setFormData] = useState({ name: '', email: '', password: '' });
   const [error, setError] = useState('');
 
+  // Forgot password flow state
+  const [forgotEmailOpen, setForgotEmailOpen] = useState(false);
+  const [forgotEmail, setForgotEmail] = useState('');
+  const [sendingReset, setSendingReset] = useState(false);
+  const [resetError, setResetError] = useState<string | null>(null);
+  const [resetSent, setResetSent] = useState(false);
+
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
@@ -263,13 +271,71 @@ const AuthPage = ({ onAuthSuccess, onGuestMode }: any) => {
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Password</label>
-            <input 
-              required
-              type="password"
-              placeholder="••••••••"
-              className="w-full px-4 py-2 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none transition-all"
-              onChange={e => setFormData({ ...formData, password: e.target.value })}
-            />
+            <PasswordInput id="auth-password" value={formData.password} onChange={e => setFormData({ ...formData, password: e.target.value })} placeholder="••••••••" />
+
+            <div className="flex items-center justify-between mt-2">
+              <div className="text-xs text-gray-500">{!isLogin ? 'Choose a secure password.' : ''}</div>
+              {isLogin && (
+                <button type="button" onClick={() => { setForgotEmailOpen(true); setForgotEmail(formData.email || ''); setResetError(null); setResetSent(false); }} className="text-sm text-blue-600 hover:underline font-medium">Forgot password?</button>
+              )}
+            </div>
+
+            {/* Strength meter for Sign Up only */}
+            {!isLogin && <StrengthMeter password={formData.password} />}
+
+            {/* Forgot Password modal */}
+            {forgotEmailOpen && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+                <Card className="w-full max-w-md p-6">
+                  <div className="mb-4">
+                    <h3 className="text-lg font-bold">Reset Password</h3>
+                    <p className="text-sm text-gray-500">Enter your email and we will send a password reset link if an account exists.</p>
+                  </div>
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm text-gray-600 mb-1">Email</label>
+                      <input type="email" className="w-full px-4 py-2 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none" value={forgotEmail} onChange={(e) => setForgotEmail(e.target.value)} />
+                    </div>
+                    {resetError && <div className="text-red-500 text-sm">{resetError}</div>}
+                    {resetSent && <div className="text-sm text-green-600">If an account exists for that email, a reset link has been sent.</div>}
+                    <div className="flex gap-2 justify-end">
+                      <Button variant="ghost" onClick={() => { setForgotEmailOpen(false); setResetError(null); }}>{resetSent ? 'Close' : 'Cancel'}</Button>
+                      {!resetSent && <Button onClick={async () => {
+                        setResetError(null);
+                        setSendingReset(true);
+                        try {
+                          if (!forgotEmail) { setResetError('Please enter an email address.'); setSendingReset(false); return; }
+                          if (supabase && supabase.auth) {
+                            let res: any = { data: null, error: null };
+                            if (typeof (supabase.auth as any).resetPasswordForEmail === 'function') {
+                              res = await (supabase.auth as any).resetPasswordForEmail(forgotEmail, { redirectTo: window.location.origin + '?type=recovery' });
+                            } else if ((supabase.auth as any).api && typeof (supabase.auth as any).api.resetPasswordForEmail === 'function') {
+                              res = await (supabase.auth as any).api.resetPasswordForEmail(forgotEmail, { redirectTo: window.location.origin + '?type=recovery' });
+                            } else {
+                              res = { data: null, error: new Error('Password reset not available') };
+                            }
+
+                            if (res.error) {
+                              console.error('Supabase reset error:', res.error);
+                              setResetError('Failed to send reset link. Please try again later.');
+                            } else {
+                              setResetSent(true);
+                            }
+                          } else {
+                            setResetError('Password reset is not available in this environment.');
+                          }
+                        } catch (err) {
+                          console.error('Reset request failed:', err);
+                          setResetError('Failed to send reset link.');
+                        }
+                        setSendingReset(false);
+                      }} disabled={sendingReset}>{sendingReset ? 'Sending...' : 'Send reset link'}</Button>}
+                    </div>
+                  </div>
+                </Card>
+              </div>
+            )}
+
           </div>
           
           {error && <p className="text-red-500 text-sm flex items-center gap-1"><AlertCircle className="w-4 h-4" /> {error}</p>}
@@ -413,8 +479,9 @@ const Dashboard = ({ user, scans, isGuest, role, setRole, onNewScan, onViewScan,
 const UploadSection = ({ role, user, isGuest, onAnalyze, onTriggerUpgrade }: any) => {
   const [jdFile, setJdFile] = useState<File | null>(null);
   const [jdText, setJdText] = useState<string>("");
-  // Mode controls whether we show the typed JD textarea or the upload control. Default to 'type'.
-  const [jdMode, setJdMode] = useState<'type' | 'upload'>('type');
+  // Mode controls whether we show the typed JD textarea or the upload control. Default to 'upload'.
+  // This ensures the Upload JD dropzone is visible on first render / refresh when no prior choice exists.
+  const [jdMode, setJdMode] = useState<'type' | 'upload'>('upload');
   // If a JD file is set, prefer upload mode; if typed JD is present prefer type mode.
   useEffect(() => { if (jdFile && jdMode !== 'upload') { setJdMode('upload'); } }, [jdFile]);
   useEffect(() => { if (jdText && jdText.trim() && jdMode !== 'type') { setJdMode('type'); } }, [jdText]);
@@ -458,23 +525,25 @@ const UploadSection = ({ role, user, isGuest, onAnalyze, onTriggerUpgrade }: any
           <div>
             <h3 className="font-bold text-lg flex items-center gap-2"><Briefcase className="w-5 h-5 text-blue-600" /> Job Description</h3>
             {/* Segmented control placed immediately below the title to feel integrated with the header. */}
-            <div className="mt-2">
+            <div className="mt-3 flex justify-center">
               <div role="tablist" aria-label="Job description input mode" className="inline-flex rounded-full border border-gray-200 dark:border-gray-800 overflow-hidden">
                 <button
                   role="tab"
                   aria-selected={jdMode === 'type'}
                   onClick={() => { setJdMode('type'); setJdFile(null); }}
-                  className={`px-3 py-2 text-sm font-bold flex-1 text-center transition-colors focus:outline-none ${jdMode === 'type' ? 'bg-blue-50 dark:bg-blue-900/10 text-blue-600 shadow-sm' : 'text-gray-600 hover:text-gray-800 hover:border-transparent' } rounded-l-full`}
+                  className={`px-4 py-2 text-sm font-bold flex-1 text-center transition-colors duration-150 focus:outline-none ${jdMode === 'type' ? 'bg-blue-50 dark:bg-blue-900/10 text-blue-600 shadow-inner' : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-900/20' } rounded-l-full`}
+                  style={{ lineHeight: '1' }}
                 >
-                  Type JD
+                  <span className="block leading-tight">Type JD</span>
                 </button>
                 <button
                   role="tab"
                   aria-selected={jdMode === 'upload'}
                   onClick={() => { setJdMode('upload'); setJdText(''); }}
-                  className={`px-3 py-2 text-sm font-bold flex-1 text-center transition-colors focus:outline-none ${jdMode === 'upload' ? 'bg-blue-50 dark:bg-blue-900/10 text-blue-600 shadow-sm' : 'text-gray-600 hover:text-gray-800 hover:border-transparent' } rounded-r-full`}
+                  className={`px-4 py-2 text-sm font-bold flex-1 text-center transition-colors duration-150 focus:outline-none ${jdMode === 'upload' ? 'bg-blue-50 dark:bg-blue-900/10 text-blue-600 shadow-inner' : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-900/20' } rounded-r-full`}
+                  style={{ lineHeight: '1' }}
                 >
-                  Upload JD
+                  <span className="block leading-tight">Upload JD</span>
                 </button>
               </div>
             </div>
@@ -728,12 +797,69 @@ const UpgradeModal = ({ isOpen, onAuth, onUpgradePro, onCancel }: any) => {
   );
 };
 
+// Helper: Evaluate password strength (simple deterministic rules)
+const getPasswordScore = (pw: string) => {
+  let score = 0;
+  if (!pw || pw.length === 0) return { score, label: '', pct: 0 };
+  if (pw.length >= 8) score++;
+  if (/[A-Z]/.test(pw) && /[a-z]/.test(pw)) score++;
+  if (/[0-9]/.test(pw)) score++;
+  if (/[^A-Za-z0-9]/.test(pw)) score++;
+  const capped = Math.min(score, 3);
+  const label = capped <= 1 ? 'Weak' : (capped === 2 ? 'Medium' : 'Strong');
+  const pct = Math.round((capped / 3) * 100);
+  return { score: capped, label, pct };
+};
+
+// Reusable password input with emoji toggle
+const PasswordInput = ({ value, onChange, id, placeholder }: any) => {
+  const [visible, setVisible] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  return (
+    <div className="relative">
+      <input
+        id={id}
+        ref={inputRef}
+        type={visible ? 'text' : 'password'}
+        value={value}
+        onChange={onChange}
+        placeholder={placeholder}
+        className="w-full px-4 py-2 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+      />
+      <button
+        type="button"
+        aria-label={visible ? 'Hide password' : 'Show password'}
+        onMouseDown={(e) => e.preventDefault()} // prevent blur
+        onClick={() => setVisible(v => !v)}
+        className="absolute right-3 top-1/2 -translate-y-1/2 text-sm cursor-pointer select-none opacity-70 hover:opacity-100 transition-opacity"
+        style={{ lineHeight: 1 }}
+      >
+        {visible ? '👁️' : '🙈'}
+      </button>
+    </div>
+  );
+};
+
+const StrengthMeter = ({ password }: any) => {
+  const { label, pct } = getPasswordScore(password);
+  if (!password || password.length === 0) return null;
+  const colorClass = label === 'Weak' ? 'bg-red-500' : (label === 'Medium' ? 'bg-amber-500' : 'bg-green-500');
+  return (
+    <div className="mt-2">
+      <div className="w-full bg-gray-100 dark:bg-gray-800 h-2 rounded-full overflow-hidden">
+        <div className={`${colorClass} h-2`} style={{ width: `${pct}%` }} />
+      </div>
+      <div className="mt-1 text-xs font-bold text-gray-600 dark:text-gray-300">{label}</div>
+    </div>
+  );
+};
+
 // --- Main App ---
 
 const App = () => {
   const [user, setUser] = useState<UserAccount | null>(null);
   const [isGuest, setIsGuest] = useState(false);
-  const [page, setPage] = useState<'dashboard' | 'upload' | 'processing' | 'results' | 'auth'>('auth');
+  const [page, setPage] = useState<'dashboard' | 'upload' | 'processing' | 'results' | 'auth' | 'reset'>('auth');
   const [role, setRole] = useState<Role>('candidate');
   // Theme handling: respect system preference unless user explicitly chooses a theme. Do NOT persist system preference on mount.
   const [manualTheme, setManualTheme] = useState<'light' | 'dark' | null>(() => {
@@ -755,6 +881,101 @@ const App = () => {
     }
   });
 
+  // Profile dropdown state & handlers (minimal, accessible)
+  const [profileOpen, setProfileOpen] = useState(false);
+  const profileRef = useRef<HTMLDivElement | null>(null);
+
+  // Reset Password modal state (opened from profile dropdown)
+  const [resetModalOpen, setResetModalOpen] = useState(false);
+  const [resetPw, setResetPw] = useState('');
+  const [resetConfirmPw, setResetConfirmPw] = useState('');
+
+  // Dedicated Reset Page (when user clicks recovery link)
+  const [resetPageNew, setResetPageNew] = useState('');
+  const [resetPageConfirm, setResetPageConfirm] = useState('');
+  const [resetPageError, setResetPageError] = useState<string | null>(null);
+  const [resetPageProcessing, setResetPageProcessing] = useState(false);
+
+  // Change Password modal state (full flow with old/new/confirm)
+  const [changePwOpen, setChangePwOpen] = useState(false);
+  const [cpOld, setCpOld] = useState('');
+  const [cpNew, setCpNew] = useState('');
+  const [cpConfirm, setCpConfirm] = useState('');
+  const [cpError, setCpError] = useState<string | null>(null);
+
+  // Success message banner
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!profileOpen) return;
+    const onClick = (e: MouseEvent) => {
+      if (profileRef.current && !profileRef.current.contains(e.target as Node)) setProfileOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setProfileOpen(false);
+    };
+    document.addEventListener('mousedown', onClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [profileOpen]);
+
+  // Close reset modal on Escape or outside click
+  useEffect(() => {
+    if (!resetModalOpen) return;
+    const onClick = (e: MouseEvent) => {
+      const el = document.getElementById('reset-modal');
+      if (el && !el.contains(e.target as Node)) setResetModalOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setResetModalOpen(false);
+    };
+    document.addEventListener('mousedown', onClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [resetModalOpen]);
+
+  // Manage body scroll lock and ESC handling for change password modal, plus focus trap
+  useEffect(() => {
+    if (!changePwOpen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    const modal = document.getElementById('change-pw-modal');
+    // focus first input when opened
+    const firstInput: HTMLElement | null = modal ? modal.querySelector('input') : null;
+    firstInput?.focus();
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setChangePwOpen(false);
+      if (e.key === 'Tab' && modal) {
+        // Focus trap: keep tab within modal
+        const focusable = Array.from(modal.querySelectorAll<HTMLElement>('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')).filter(el => !el.hasAttribute('disabled'));
+        if (focusable.length === 0) return;
+        const idx = focusable.indexOf(document.activeElement as HTMLElement);
+        if (e.shiftKey && idx === 0) { e.preventDefault(); focusable[focusable.length - 1].focus(); }
+        else if (!e.shiftKey && idx === focusable.length - 1) { e.preventDefault(); focusable[0].focus(); }
+      }
+    };
+    const onClick = (e: MouseEvent) => {
+      const el = document.getElementById('change-pw-modal');
+      if (el && !el.contains(e.target as Node)) setChangePwOpen(false);
+    };
+
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onClick);
+    return () => {
+      document.body.style.overflow = prev;
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('mousedown', onClick);
+    };
+  }, [changePwOpen]);
+
   const [guestScans, setGuestScans] = useState<ResumeScan[]>([]);
   const [isPrivacyOpen, setIsPrivacyOpen] = useState(false);
   const [isUpgradeOpen, setIsUpgradeOpen] = useState(false);
@@ -767,6 +988,15 @@ const App = () => {
     const guests = storage.getGuestScans();
     setGuestScans(guests);
     if (session) { setUser(session); setIsGuest(false); setPage('dashboard'); }
+
+    // Detect Supabase reset link in URL: if present, show dedicated Reset Password page
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const hashParams = new URLSearchParams((window.location.hash || '').replace(/^#/, ''));
+      if (params.get('type') === 'recovery' || params.get('access_token') || hashParams.get('access_token') || hashParams.get('type') === 'recovery') {
+        setPage('reset');
+      }
+    } catch (e) { /* ignore */ }
   }, []);
 
   useEffect(() => {
@@ -961,9 +1191,44 @@ const App = () => {
             </button>
             <div className="flex items-center gap-4">
               <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-full bg-blue-50 dark:bg-blue-900/40 flex items-center justify-center border border-blue-100 dark:border-blue-900/50">
-                  <User className="w-5 h-5 text-blue-600" />
+                 <div ref={profileRef} className="relative">
+                  <button
+                    onClick={() => setProfileOpen(v => !v)}
+                    aria-haspopup="menu"
+                    aria-expanded={profileOpen}
+                    className="w-9 h-9 rounded-full bg-blue-50 dark:bg-blue-900/40 flex items-center justify-center border border-blue-100 dark:border-blue-900/50 focus:outline-none focus:ring-2 focus:ring-blue-300"
+                    title={user?.name || 'Guest Account'}
+                  >
+                    <User className="w-5 h-5 text-blue-600" />
+                  </button>
+
+                  {profileOpen && (
+                    <div role="menu" aria-label="User menu" className="absolute right-0 mt-2 w-56 bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 rounded-lg shadow-md py-2 z-50">
+                      <div className="px-4 py-2">
+                        <div className="text-sm font-bold text-gray-800 dark:text-gray-200 truncate">{user?.name || 'Guest Account'}</div>
+                        <div className="text-xs text-gray-500 dark:text-gray-400 truncate">{user?.email || 'guest'}</div>
+                      </div>
+                      <div className="border-t border-gray-100 dark:border-gray-700 my-1" />
+                      <button
+                        className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+                        onClick={() => {
+                          setProfileOpen(false);
+                          setCpOld(''); setCpNew(''); setCpConfirm(''); setCpError(null);
+                          setChangePwOpen(true);
+                        }}
+                      >
+                        Change Password
+                      </button>
+                      <button
+                        className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+                        onClick={() => { setProfileOpen(false); handleLogout(); }}
+                      >
+                        Sign Out
+                      </button>
+                    </div>
+                  )}
                 </div>
+
                 <div className="hidden md:block">
                   <span className="text-sm font-black truncate max-w-[120px] block">{user?.name || "Guest Account"}</span>
                   <span className="text-[10px] uppercase font-black tracking-widest text-blue-600">{user?.plan || "Trial Mode"}</span>
@@ -975,8 +1240,150 @@ const App = () => {
         </header>
       )}
 
+      {/* Reset Password Modal */}
+      {changePwOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div id="change-pw-modal" className="w-full max-w-md p-6 animate-fade-up transform transition-all">
+            <Card>
+              <div className="mb-4">
+                <h3 className="text-lg font-bold">Change Password</h3>
+                <p className="text-sm text-gray-500">Enter your current password and set a new password.</p>
+              </div>
+
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Old Password</label>
+                  <PasswordInput id="old-pw" value={cpOld} onChange={(e: any) => setCpOld(e.target.value)} placeholder="Current password" />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">New Password</label>
+                  <PasswordInput id="new-pw" value={cpNew} onChange={(e: any) => setCpNew(e.target.value)} placeholder="New password" />
+                  <StrengthMeter password={cpNew} />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Confirm New Password</label>
+                  <PasswordInput id="confirm-pw" value={cpConfirm} onChange={(e: any) => setCpConfirm(e.target.value)} placeholder="Confirm new password" />
+                </div>
+
+                {cpError && <div className="text-red-500 text-sm">{cpError}</div>}
+
+                <div className="flex items-center gap-2 justify-end">
+                  <Button variant="ghost" onClick={() => setChangePwOpen(false)}>Cancel</Button>
+                  <Button onClick={async () => {
+                    setCpError(null);
+                    if (!cpOld || !cpNew || !cpConfirm) { setCpError('All fields are required.'); return; }
+                    if (cpNew !== cpConfirm) { setCpError('New passwords do not match.'); return; }
+
+                    // First try local storage change for local accounts
+                    try {
+                      const users = storage.getUsers();
+                      const idx = users.findIndex(u => u.email === user?.email);
+                      if (idx !== -1 && users[idx].password === cpOld) {
+                        users[idx].password = cpNew;
+                        storage.setUsers(users);
+                        setChangePwOpen(false);
+                        setSuccessMessage('Password changed successfully');
+                        setTimeout(() => setSuccessMessage(null), 3500);
+                        return;
+                      }
+                    } catch (err) {
+                      console.error('Local password update error:', err);
+                      // continue to try Supabase if available
+                    }
+
+                    // Otherwise, attempt Supabase update for authenticated users
+                    try {
+                      if (supabase && supabase.auth) {
+                        // Attempt modern API first
+                        if (typeof (supabase.auth as any).updateUser === 'function') {
+                          const { data, error } = await (supabase.auth as any).updateUser({ password: cpNew });
+                          if (error) { setCpError('Failed to update password.'); console.error('Supabase updateUser error:', error); return; }
+                          setChangePwOpen(false);
+                          setSuccessMessage('Password changed successfully');
+                          setTimeout(() => setSuccessMessage(null), 3500);
+                          return;
+                        } else if (typeof (supabase.auth as any).update === 'function') {
+                          const { data, error } = await (supabase.auth as any).update({ password: cpNew });
+                          if (error) { setCpError('Failed to update password.'); console.error('Supabase update error:', error); return; }
+                          setChangePwOpen(false);
+                          setSuccessMessage('Password changed successfully');
+                          setTimeout(() => setSuccessMessage(null), 3500);
+                          return;
+                        }
+                      }
+                      setCpError('Password update is not available in this environment.');
+                    } catch (err) {
+                      console.error('Supabase password update error:', err);
+                      setCpError('Failed to update password.');
+                    }
+
+                  }}>Save</Button>
+                </div>
+              </div>
+            </Card>
+          </div>
+        </div>
+      )}
+
       <main className="pb-24 pt-4">
         {page === 'auth' && <AuthPage onAuthSuccess={handleAuthSuccess} onGuestMode={() => { setIsGuest(true); setPage('dashboard'); }} />}
+
+        {page === 'reset' && (
+          <div className="min-h-screen flex items-center justify-center p-6">
+            <Card className="w-full max-w-md p-8">
+              <div className="mb-4">
+                <h2 className="text-2xl font-bold">Reset Password</h2>
+                <p className="text-sm text-gray-500">Complete your password reset by setting a new password.</p>
+              </div>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">New Password</label>
+                  <PasswordInput id="reset-new" value={resetPageNew} onChange={(e: any) => setResetPageNew(e.target.value)} placeholder="New password" />
+                  <StrengthMeter password={resetPageNew} />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Confirm New Password</label>
+                  <PasswordInput id="reset-confirm" value={resetPageConfirm} onChange={(e: any) => setResetPageConfirm(e.target.value)} placeholder="Confirm new password" />
+                </div>
+                {resetPageError && <div className="text-red-500 text-sm">{resetPageError}</div>}
+                <div className="flex justify-end gap-2">
+                  <Button variant="ghost" onClick={() => setPage('auth')}>Cancel</Button>
+                  <Button onClick={async () => {
+                    setResetPageError(null);
+                    if (!resetPageNew || !resetPageConfirm) { setResetPageError('All fields are required.'); return; }
+                    if (resetPageNew !== resetPageConfirm) { setResetPageError('Passwords do not match.'); return; }
+                    setResetPageProcessing(true);
+                    try {
+                      if (supabase && supabase.auth) {
+                        if (typeof (supabase.auth as any).updateUser === 'function') {
+                          const { data, error } = await (supabase.auth as any).updateUser({ password: resetPageNew });
+                          if (error) { setResetPageError('Failed to update password.'); console.error('Supabase updateUser error:', error); setResetPageProcessing(false); return; }
+                        } else if (typeof (supabase.auth as any).update === 'function') {
+                          const { data, error } = await (supabase.auth as any).update({ password: resetPageNew });
+                          if (error) { setResetPageError('Failed to update password.'); console.error('Supabase update error:', error); setResetPageProcessing(false); return; }
+                        } else {
+                          setResetPageError('Password update is not available in this environment.'); setResetPageProcessing(false); return;
+                        }
+
+                        setSuccessMessage('Password reset successfully');
+                        setTimeout(() => setSuccessMessage(null), 3500);
+                        setPage('auth');
+                      } else {
+                        setResetPageError('Password reset is not available in this environment.');
+                      }
+                    } catch (err) {
+                      console.error('Password reset failed:', err);
+                      setResetPageError('Failed to reset password.');
+                    }
+                    setResetPageProcessing(false);
+                  }} disabled={resetPageProcessing}>{resetPageProcessing ? 'Saving...' : 'Save New Password'}</Button>
+                </div>
+              </div>
+            </Card>
+          </div>
+        )}
         
         {page === 'dashboard' && (
           <Dashboard 
