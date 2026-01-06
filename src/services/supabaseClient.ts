@@ -291,11 +291,19 @@ export async function signUpWithEmail({ name, email, password, role = 'candidate
     // Use the `options.data` payload to pass user metadata for DB triggers to consume
     // (Supabase JS v2 supports `options: { data }`). Fallback to the simpler shape when not present.
     let signUpResult: any;
+    const redirectTo = ((import.meta as any)?.env?.VITE_SITE_URL) || process.env.VITE_SITE_URL || undefined;
+
     if ((supabase.auth as any).signUp.length >= 1) {
-      // Modern client
-      signUpResult = await (supabase.auth as any).signUp({ email, password, options: { data: { name: name || null, role } } });
+      // Modern client: include emailRedirectTo so production verification links return to the site
+      signUpResult = await (supabase.auth as any).signUp({ email, password, options: { data: { name: name || null, role }, emailRedirectTo: redirectTo } });
     } else {
-      signUpResult = await supabase.auth.signUp({ email, password });
+      // Older client: include redirectTo where supported
+      try {
+        signUpResult = await supabase.auth.signUp({ email, password, redirectTo: redirectTo });
+      } catch (e) {
+        // Fallback to simple call
+        signUpResult = await supabase.auth.signUp({ email, password });
+      }
     }
 
     const err = signUpResult?.error;

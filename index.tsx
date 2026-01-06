@@ -225,7 +225,29 @@ const AuthPage = ({ onAuthSuccess, onGuestMode, showToast }: any) => {
         if (res.error) {
           // Special case: unverified email
           if (res.error === 'Please verify your email before signing in') {
-            try { showToast && showToast({ type: 'info', message: res.error }); setTimeout(() => showToast && showToast(null), 3500); } catch (e) { /* ignore */ }
+            try {
+              showToast && showToast({
+                type: 'info',
+                message: res.error,
+                actionLabel: 'Resend email',
+                action: async () => {
+                  try {
+                    showToast && showToast({ type: 'info', message: 'Sending verification email...' });
+                    const r = await resendVerification(formData.email);
+                    if (r.error) {
+                      showToast && showToast({ type: 'error', message: r.error?.message || r.error || 'Failed to resend verification email' });
+                    } else {
+                      showToast && showToast({ type: 'success', message: 'Verification email sent — check your inbox.' });
+                    }
+                    setTimeout(() => showToast && showToast(null), 3500);
+                  } catch (e) {
+                    void (await import('./src/services/supabaseClient')).logAppError('resendVerificationAction', e);
+                    showToast && showToast({ type: 'error', message: 'Failed to send verification email.' });
+                    setTimeout(() => showToast && showToast(null), 3500);
+                  }
+                }
+              });
+            } catch (e) { /* ignore */ }
             return;
           }
           setError(res.error);
@@ -595,15 +617,8 @@ const UploadSection = ({ role, user, isGuest, onAnalyze, onTriggerUpgrade }: any
       return;
     }
 
-    if (role === 'candidate') {
-      const nameToCheck = isGuest ? guestName.toLowerCase() : user.name.toLowerCase();
-      if (!nameToCheck) { setError("Please provide your name for validation."); return; }
-      const firstResume = resumes[0].name.toLowerCase();
-      if (!firstResume.includes(nameToCheck.split(' ')[0]) && !firstResume.includes(nameToCheck.split(' ').pop() || '')) {
-        setError("Name mismatch: Resume file name must contain your name for Candidate mode.");
-        return;
-      }
-    }
+    // Removed strict filename validation: Candidate uploads are no longer blocked by resume filename checks.
+    // (Validation was causing false-positives and blocking legitimate uploads.)
     onAnalyze(jdFile, resumes, jdText);
   };
 
