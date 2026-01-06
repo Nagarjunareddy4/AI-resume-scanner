@@ -2,7 +2,7 @@ import fetch from 'node-fetch';
 import { createClient } from '@supabase/supabase-js';
 
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
-const STRIPE_PRO_PRICE_ID = process.env.STRIPE_PRO_PRICE_ID;
+const STRIPE_PRICE_ID = process.env.STRIPE_PRICE_ID || process.env.STRIPE_PRO_PRICE_ID || undefined;
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const SITE_URL = (process.env.VITE_SITE_URL || '').replace(/\/$/, '');
@@ -48,8 +48,8 @@ export default async function handler(req: any, res: any) {
     await logAppError('stripe:missing_env', envMissing('STRIPE_SECRET_KEY'));
     return res.status(500).json({ error: 'Stripe is not configured on the server' });
   }
-  if (!STRIPE_PRO_PRICE_ID) {
-    await logAppError('stripe:missing_env', envMissing('STRIPE_PRO_PRICE_ID'));
+  if (!STRIPE_PRICE_ID) {
+    await logAppError('stripe:missing_env', envMissing('STRIPE_PRICE_ID'));
     return res.status(500).json({ error: 'Stripe price ID is not configured' });
   }
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) {
@@ -117,7 +117,7 @@ export default async function handler(req: any, res: any) {
       const session = await stripe.checkout.sessions.create({
         mode: 'subscription',
         payment_method_types: ['card'],
-        line_items: [{ price: STRIPE_PRO_PRICE_ID, quantity: 1 }],
+        line_items: [{ price: STRIPE_PRICE_ID, quantity: 1 }],
         allow_promotion_codes: true,
         customer: stripeCustomerId as string,
         success_url: `${SITE_URL}/billing/success`,

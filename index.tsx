@@ -1437,12 +1437,32 @@ const App = () => {
       }
 
       const resp = await fetch('/api/stripe/create-checkout-session', { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
-      const body = await resp.json();
-      if (!resp.ok || !body || !body.url) {
+      let body: any = null;
+      try { body = await resp.json(); } catch (e) { body = null; }
+
+      if (resp.status === 401) {
+        setToast({ type: 'info', message: 'Please sign in to upgrade' });
+        setTimeout(() => setToast(null), 3500);
+        return;
+      }
+      if (resp.status === 500) {
+        await logAppError('upgradeToPro:create_checkout_failed', body || 'Server 500');
+        setToast({ type: 'error', message: 'Billing service unavailable. Try again.' });
+        setTimeout(() => setToast(null), 3500);
+        return;
+      }
+
+      if (!resp.ok) {
         console.error('create-checkout error', body);
         await logAppError('upgradeToPro:create_checkout_failed', body);
-        setIsUpgradeProcessing(false);
         setToast({ type: 'error', message: body?.error || 'Failed to start checkout session' });
+        setTimeout(() => setToast(null), 3500);
+        return;
+      }
+
+      if (!body || !body.url) {
+        await logAppError('upgradeToPro:create_checkout_failed', { reason: 'missing_url', body });
+        setToast({ type: 'error', message: 'Billing service returned an invalid response. Try again.' });
         setTimeout(() => setToast(null), 3500);
         return;
       }
