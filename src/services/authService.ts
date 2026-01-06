@@ -1,4 +1,4 @@
-import { supabase, isSupabaseConfigured, signUpWithEmail, signInWithEmail, signOutUser, createUserRecord, fetchScansByUser, logAppError, updateUserRole } from './supabaseClient';
+import { supabase, isSupabaseConfigured, signUpWithEmail, signInWithEmail, signOutUser, fetchScansByUser, logAppError, updateUserRole } from './supabaseClient';
 
 /**
  * AuthService provides a compatibility layer so existing UI code that calls
@@ -58,14 +58,27 @@ export async function getCurrentUser() {
     const userInfo = (res as any).data?.user;
     if (!userInfo) return null;
 
-    // Fetch row from users table
-    const { data, error } = await supabase.from('users').select('*').eq('email', userInfo.email).limit(1);
-    if (error) {
-      await logAppError('getCurrentUser:fetchRow', error);
+    // Fetch row from users table. Prefer lookup by auth uid (id) when available; fallback to email.
+    const uid = (userInfo as any).id;
+    let data: any = null;
+    try {
+      if (uid) {
+        const r = await supabase.from('users').select('*').eq('id', uid).limit(1);
+        if (r.error) { await logAppError('getCurrentUser:fetchRowById', r.error); }
+        else if (r.data && r.data.length > 0) data = r.data;
+      }
+
+      if (!data) {
+        const r = await supabase.from('users').select('*').eq('email', userInfo.email).limit(1);
+        if (r.error) { await logAppError('getCurrentUser:fetchRowByEmail', r.error); }
+        else data = r.data;
+      }
+    } catch (err) {
+      await logAppError('getCurrentUser:fetchRow:exception', err);
       return null;
     }
-    if (!data || data.length === 0) return null;
 
+    if (!data || data.length === 0) return null;
     const row = data[0];
 
     // Derive verification and provider info
@@ -113,12 +126,10 @@ export async function signUp(payload: { name?: string, email: string, password: 
     const res = await signUpWithEmail({ name, email, password, role: (role as any) || 'candidate' });
     if (res.error) return { error: res.error };
 
-    // fetch created user row
-    const user = res.user;
-    // Newly signed up email/password users are unverified until Supabase confirms their email.
-    return { user: { id: user.id, name: user.name || name || '', email: user.email, scans: [], plan: user.plan || 'free', isEmailVerified: false, isEmailUser: true, isOAuthUser: false } };
+    // Success: Supabase will send an email verification; do NOT auto-login or create users client-side.
+    return { ok: true };
   } catch (err) {
-    await logAppError('signUp', err);
+    void logAppError('signUp', err);
     return { error: 'Unknown signup error' };
   }
 }
@@ -130,13 +141,22 @@ export async function signIn(payload: { email: string, password: string }) {
     if (res.error) return { error: res.error };
 
     const user = res.user;
-    // fetch user's scans to mirror previous experience
-    const scans = await fetchScansByUser(user.email).catch(() => []);
-    // Derive auth flags from auth state
+
+    // Derive auth flags from auth state and enforce verification for email/password users
     const status = await getAuthStatus().catch(() => ({ isEmailVerified: false, isEmailUser: true, isOAuthUser: false } as any));
+
+    if (status.isEmailUser && !status.isEmailVerified) {
+      // Sign-out any session created and block login
+      try { await signOutUser(); } catch (e) { void logAppError('signIn:signOutOnUnverified', e); }
+      return { error: 'Please verify your email before signing in' };
+    }
+
+    // fetch user's scans to mirror previous experience (non-blocking)
+    const scans = await fetchScansByUser(user.email).catch(() => []);
+
     return { user: { id: user.id, name: user.name || '', email: user.email, scans: scans || [], plan: user.plan || 'free', isEmailVerified: status.isEmailVerified, isEmailUser: status.isEmailUser, isOAuthUser: status.isOAuthUser } };
   } catch (err) {
-    await logAppError('signIn', err);
+    void logAppError('signIn', err);
     return { error: 'Unknown sign-in error' };
   }
 }

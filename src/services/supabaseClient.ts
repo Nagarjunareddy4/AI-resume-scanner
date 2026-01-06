@@ -181,38 +181,10 @@ export async function logAppError(source: string, error: any) {
   }
 }
 
-/**
- * Create a user record in `users` table. If the row already exists return it.
- */
-export async function createUserRecord({ id, email, role = 'candidate', name, plan = 'free' }: { id?: string, email: string, role?: string, name?: string, plan?: string }) {
-  if (!isSupabaseConfigured) { console.error('[supabase] createUserRecord skipped: Supabase not configured.'); return null; }
-  try {
-    // If user exists, return it
-    const { data: existing } = await supabase.from('users').select('*').eq('email', email).limit(1).throwOnError().maybeSingle();
-    if (existing) return existing;
+/* NOTE: `public.users` rows MUST be created by a database trigger on `auth.users`.
+   Removing client-side `createUserRecord` to enforce that invariant and avoid
+   races where the frontend inserts rows before email verification completes. */
 
-    // Enforce role/plan policy: recruiter requires pro plan
-    if (role === 'recruiter' && plan !== 'pro') {
-      const err = new Error('Cannot assign recruiter role without pro plan');
-      await logAppError('createUserRecord:rolePolicy', err);
-      throw err;
-    }
-
-    const payload: any = { email, role, plan };
-    if (id) payload.id = id;
-    if (name) payload.name = name;
-
-    const { data, error } = await supabase.from('users').insert(payload).select().maybeSingle();
-    if (error) {
-      await logAppError('createUserRecord', error);
-      throw error;
-    }
-    return data;
-  } catch (err) {
-    await logAppError('createUserRecord', err);
-    throw err;
-  }
-}
 
 /**
  * Insert an auth log into `auth_logs` table. Non-blocking helper.
@@ -302,48 +274,42 @@ export async function verifyUserForUpgrade(userId: string) {
 }
 
 /**
- * Sign up a user using Supabase Auth and create a corresponding users row.
- * Enforces duplicate email check per requirements.
+ * Sign up a user using Supabase Auth. Important rules:
+ * - Only call supabase.auth.signUp from the frontend (do NOT insert into public.users)
+ * - Rely on DB trigger to create `public.users` rows after successful verification/provider sign-in
+ * - Do NOT perform any auto-login here
  */
 export async function signUpWithEmail({ name, email, password, role = 'candidate' }: { name?: string, email: string, password: string, role?: string }) {
   try {
     if (!isSupabaseConfigured) {
-      // Fallback behaviour is handled by the app's local storage layer.
       throw new Error('Supabase not configured');
     }
 
-    // Validate role
+    // Validate role (client-side metadata only)
     if (role !== 'candidate' && role !== 'recruiter') role = 'candidate';
 
-    // Check if user exists in users table
-    const { data: exists, error: existsErr } = await supabase.from('users').select('*').eq('email', email).limit(1);
-    if (existsErr) {
-      await logAppError('signUpWithEmail:check', existsErr);
-      return { error: 'Failed to validate email' };
-    }
-    if (exists && exists.length > 0) {
-      return { error: 'Email already exists, please sign in' };
-    }
-
-    // Create auth user
-    const { data: signUpData, error: signUpErr } = await supabase.auth.signUp({ email, password });
-    if (signUpErr) {
-      await logAppError('signUpWithEmail:auth', signUpErr);
-      return { error: signUpErr.message || 'Failed to sign up' };
+    // Use the `options.data` payload to pass user metadata for DB triggers to consume
+    // (Supabase JS v2 supports `options: { data }`). Fallback to the simpler shape when not present.
+    let signUpResult: any;
+    if ((supabase.auth as any).signUp.length >= 1) {
+      // Modern client
+      signUpResult = await (supabase.auth as any).signUp({ email, password, options: { data: { name: name || null, role } } });
+    } else {
+      signUpResult = await supabase.auth.signUp({ email, password });
     }
 
-    const userId = signUpData?.user?.id;
-
-    // Insert into users table with auth uid
-    try {
-      const userRow = await createUserRecord({ id: userId, email, role, name });
-      return { user: userRow };
-    } catch (err) {
-      await logAppError('signUpWithEmail:createUser', err);
-      return { error: 'Failed to create user record' };
+    const err = signUpResult?.error;
+    if (err) {
+      // Surface Supabase error message to caller, but log details non-blocking
+      void logAppError('signUpWithEmail:auth', err);
+      return { error: err.message || err };
     }
+
+    // Success — do not create users rows client-side and do not auto-sign-in.
+    return { data: signUpResult?.data || signUpResult };
   } catch (err) {
-    await logAppError('signUpWithEmail', err);
+    // Log asynchronously and return sanitized error
+    void logAppError('signUpWithEmail', err);
     return { error: err?.message || 'Unknown signup error' };
   }
 }
@@ -359,42 +325,33 @@ export async function signInWithEmail({ email, password }: { email: string, pass
 
     const { data: signInData, error: signInErr } = await supabase.auth.signInWithPassword({ email, password });
     if (signInErr) {
-      await logAppError('signInWithEmail:auth', signInErr);
+      void logAppError('signInWithEmail:auth', signInErr);
       return { error: signInErr.message || 'Sign-in failed' };
     }
 
     const userId = signInData?.user?.id;
 
-    // Ensure there's a users row
-    const { data: userRows, error: userErr } = await supabase.from('users').select('*').eq('email', email).limit(1);
-    if (userErr) {
-      await logAppError('signInWithEmail:checkUser', userErr);
-      return { error: 'Failed to validate user' };
-    }
-    if (!userRows || userRows.length === 0) {
-      const e = new Error('No user row exists for this email');
-      await logAppError('signInWithEmail:missingUserRow', e);
-
-      // Proactively sign out the auth session that was just created to avoid stray sessions
-      try { await supabase.auth.signOut(); } catch (ignore) {}
-
-      return { error: 'Access denied. Please sign up.' };
-    }
-
-    // Enforce role validation
-    const role = userRows[0].role;
-    if (role !== 'candidate' && role !== 'recruiter') {
-      const e = new Error('Invalid user role');
-      await logAppError('signInWithEmail:invalidRole', e);
-      return { error: 'Access denied.' };
+    // Best-effort: fetch users row if present. Do NOT block sign-in when row is missing; DB trigger should create it.
+    let userRow: any = null;
+    try {
+      const { data: userRows, error: userErr } = await supabase.from('users').select('*').eq('id', userId).limit(1);
+      if (userErr) {
+        void logAppError('signInWithEmail:checkUser', userErr);
+      } else if (userRows && userRows.length > 0) {
+        userRow = userRows[0];
+      }
+    } catch (err) {
+      void logAppError('signInWithEmail:checkUser:exception', err);
     }
 
     // Insert LOGIN auth log (non-blocking)
-    insertAuthLog({ user_id: userRows[0].id, email, action: 'LOGIN' });
+    insertAuthLog({ user_id: userId, email, action: 'LOGIN' });
 
-    return { user: userRows[0] };
+    // If userRow exists return it, otherwise return a minimal shape derived from auth
+    if (userRow) return { user: userRow };
+    return { user: { id: userId, email, name: null, plan: 'free' } };
   } catch (err) {
-    await logAppError('signInWithEmail', err);
+    void logAppError('signInWithEmail', err);
     return { error: err?.message || 'Unknown sign-in error' };
   }
 }
@@ -490,20 +447,13 @@ export async function ensureUserRowForAuth(authUser: any) {
       return { ok: false, error: 'Email already in use' };
     }
 
-    // 3) No existing user: create a users row with id = auth uid
-    const payload: any = { id: uid, email, role: 'candidate' };
-    if (name) payload.name = name;
-    const { data: inserted, error: insertErr } = await supabase.from('users').insert(payload).select().maybeSingle();
-    if (insertErr) {
-      await logAppError('ensureUserRowForAuth:insert', insertErr);
-      try { await supabase.auth.signOut(); } catch (e) {}
-      return { ok: false, error: 'Failed to create user record' };
-    }
-
+    // If neither ID nor email rows exist, do NOT create a users row client-side.
+    // The DB trigger on auth.users should create the users row when appropriate.
+    // Insert only an auth log and return info to the caller.
     insertAuthLog({ user_id: uid, email, action: 'LOGIN' });
-    return { ok: true, user: inserted };
+    return { ok: true, user: byId && byId.length > 0 ? byId[0] : null };
   } catch (err) {
-    await logAppError('ensureUserRowForAuth:exception', err);
+    void logAppError('ensureUserRowForAuth:exception', err);
     try { await supabase.auth.signOut(); } catch (e) {}
     return { ok: false, error: 'Exception' };
   }

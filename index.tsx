@@ -223,6 +223,11 @@ const AuthPage = ({ onAuthSuccess, onGuestMode, showToast }: any) => {
       try {
         const res: any = await signIn({ email: formData.email, password: formData.password });
         if (res.error) {
+          // Special case: unverified email
+          if (res.error === 'Please verify your email before signing in') {
+            try { showToast && showToast({ type: 'info', message: res.error }); setTimeout(() => showToast && showToast(null), 3500); } catch (e) { /* ignore */ }
+            return;
+          }
           setError(res.error);
           return;
         }
@@ -242,16 +247,17 @@ const AuthPage = ({ onAuthSuccess, onGuestMode, showToast }: any) => {
           setError(res.error);
           return;
         }
-        storage.setCurrentUser(res.user.email);
-        onAuthSuccess(res.user);
 
-        // Inform user that Supabase sent the verification email (do NOT auto-resend)
+        // Success: Supabase sent verification email. Do NOT auto-login or create user rows.
         try {
-          showToast && showToast({ type: 'info', message: 'Verification email sent. Please check your inbox.' });
+          showToast && showToast({ type: 'info', message: 'Check your email to verify your account.' });
           setTimeout(() => showToast && showToast(null), 4500);
         } catch (e) {
           console.error('Failed to show verification toast', e);
         }
+
+        // Keep user on the sign-in/sign-up page and prompt them to verify their email.
+        setIsLogin(true);
 
       } catch (err: any) {
         console.error('Sign-up error:', err);
@@ -1187,15 +1193,25 @@ const App = () => {
 
   const handleLogout = () => { storage.setCurrentUser(null); setUser(null); setIsGuest(false); setPage('auth'); };
 
-  const handleAuthSuccess = (u: UserAccount) => {
+  const handleAuthSuccess = async (u: UserAccount) => {
+    // When a session is created, prefer authoritative user data from the DB trigger-backed `users` row.
+    let authoritative = null as any;
+    try {
+      authoritative = await getCurrentUserFromAuth();
+    } catch (err) {
+      console.error('Failed to fetch current user from auth service:', err);
+    }
+
+    const target = authoritative || u;
+
     const guests = storage.getGuestScans();
     if (guests.length > 0) {
-      u.scans = [...u.scans, ...guests].sort((a,b) => b.timestamp - a.timestamp);
-      storage.setUsers(storage.getUsers().map(usr => usr.email === u.email ? u : usr));
+      target.scans = [...(target.scans || []), ...guests].sort((a,b) => b.timestamp - a.timestamp);
+      storage.setUsers(storage.getUsers().map(usr => usr.email === target.email ? target : usr));
       storage.clearGuestScans();
       setGuestScans([]);
     }
-    setUser(u); setIsGuest(false); setPage('dashboard');
+    setUser(target); setIsGuest(false); setPage('dashboard');
   };
 
   const executeAnalysis = async () => {
