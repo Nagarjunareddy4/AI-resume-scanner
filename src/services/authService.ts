@@ -67,7 +67,25 @@ export async function getCurrentUser() {
     if (!data || data.length === 0) return null;
 
     const row = data[0];
-    return { id: row.id, name: row.name || '', email: row.email, scans: await fetchScansByUser(row.email), plan: row.plan || 'free' };
+
+    // Derive verification and provider info
+    const provider = (userInfo as any).app_metadata?.provider || (userInfo as any).provider || ((userInfo as any).identities && (userInfo as any).identities[0]?.provider) || null;
+    const isOAuthUser = provider && String(provider).toLowerCase() !== 'email';
+    const isEmailUser = provider ? String(provider).toLowerCase() === 'email' : true;
+    const isEmailVerified = !!(userInfo as any).email_confirmed_at || isOAuthUser;
+
+    // Optional DB sync: if users table contains 'email_verified' try to sync it (safe - non-blocking)
+    (async () => {
+      try {
+        if (row && 'email_verified' in row) {
+          await supabase.from('users').update({ email_verified: isEmailVerified }).eq('id', row.id);
+        }
+      } catch (err) {
+        // ignore errors (column may not exist)
+      }
+    })();
+
+    return { id: row.id, name: row.name || '', email: row.email, scans: await fetchScansByUser(row.email), plan: row.plan || 'free', isEmailVerified, isOAuthUser, isEmailUser };
   } catch (err) {
     await logAppError('getCurrentUser', err);
     return null;
@@ -97,7 +115,8 @@ export async function signUp(payload: { name?: string, email: string, password: 
 
     // fetch created user row
     const user = res.user;
-    return { user: { id: user.id, name: user.name || name || '', email: user.email, scans: [], plan: user.plan || 'free' } };
+    // Newly signed up email/password users are unverified until Supabase confirms their email.
+    return { user: { id: user.id, name: user.name || name || '', email: user.email, scans: [], plan: user.plan || 'free', isEmailVerified: false, isEmailUser: true, isOAuthUser: false } };
   } catch (err) {
     await logAppError('signUp', err);
     return { error: 'Unknown signup error' };
@@ -113,7 +132,9 @@ export async function signIn(payload: { email: string, password: string }) {
     const user = res.user;
     // fetch user's scans to mirror previous experience
     const scans = await fetchScansByUser(user.email).catch(() => []);
-    return { user: { id: user.id, name: user.name || '', email: user.email, scans: scans || [], plan: user.plan || 'free' } };
+    // Derive auth flags from auth state
+    const status = await getAuthStatus().catch(() => ({ isEmailVerified: false, isEmailUser: true, isOAuthUser: false } as any));
+    return { user: { id: user.id, name: user.name || '', email: user.email, scans: scans || [], plan: user.plan || 'free', isEmailVerified: status.isEmailVerified, isEmailUser: status.isEmailUser, isOAuthUser: status.isOAuthUser } };
   } catch (err) {
     await logAppError('signIn', err);
     return { error: 'Unknown sign-in error' };
@@ -231,5 +252,53 @@ export async function getAuthProvider(): Promise<string | null> {
   } catch (err) {
     await logAppError('getAuthProvider', err);
     return null;
+  }
+}
+
+/**
+ * Return the current auth session status and useful flags for UI gating.
+ */
+export async function getAuthStatus() {
+  try {
+    if (!isSupabaseConfigured) {
+      const email = (typeof window !== 'undefined') ? localStorage.getItem('resuscan_session') : null;
+      return { isGuest: !email, isOAuthUser: false, isEmailUser: !!email, isEmailVerified: false };
+    }
+
+    const res = await supabase.auth.getUser();
+    if (res.error) {
+      await logAppError('getAuthStatus:getUser', res.error);
+      return { isGuest: true, isOAuthUser: false, isEmailUser: false, isEmailVerified: false };
+    }
+    const user = (res as any).data?.user;
+    if (!user) return { isGuest: true, isOAuthUser: false, isEmailUser: false, isEmailVerified: false };
+
+    const provider = (user as any).app_metadata?.provider || (user as any).provider || ((user as any).identities && (user as any).identities[0]?.provider) || null;
+    const isOAuthUser = provider && String(provider).toLowerCase() !== 'email';
+    const isEmailUser = provider ? String(provider).toLowerCase() === 'email' : true;
+    const isEmailVerified = !!(user as any).email_confirmed_at || isOAuthUser;
+
+    return { isGuest: false, isOAuthUser, isEmailUser, isEmailVerified };
+  } catch (err) {
+    await logAppError('getAuthStatus', err);
+    return { isGuest: true, isOAuthUser: false, isEmailUser: false, isEmailVerified: false };
+  }
+}
+
+/**
+ * Resend verification email for the given address (returns { error } when present)
+ */
+export async function resendVerification(email: string) {
+  try {
+    if (!isSupabaseConfigured) return { error: 'Supabase not configured' };
+    const { error } = await supabase.auth.resend({ type: 'signup', email });
+    if (error) {
+      await logAppError('resendVerification:resend', error);
+      return { error };
+    }
+    return {};
+  } catch (err) {
+    await logAppError('resendVerification', err);
+    return { error: err?.message || 'Failed to resend verification' };
   }
 }

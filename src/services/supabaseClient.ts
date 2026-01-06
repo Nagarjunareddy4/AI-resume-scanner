@@ -265,6 +265,43 @@ export async function updateUserRole(userId: string, newRole: string) {
 }
 
 /**
+ * Verify whether a user is eligible to start an upgrade to Pro.
+ * Returns { ok: true } when allowed, or { ok: false, reason } when blocked.
+ * This helper is suitable for server-side guards (call from backend before creating a payment session).
+ */
+export async function verifyUserForUpgrade(userId: string) {
+  if (!isSupabaseConfigured) return { ok: false, reason: 'supabase_not_configured' };
+  try {
+    const { data: rows, error } = await supabase.from('users').select('*').eq('id', userId).limit(1);
+    if (error) { await logAppError('verifyUserForUpgrade:fetch', error); return { ok: false, reason: 'failed_fetch' }; }
+    if (!rows || rows.length === 0) return { ok: false, reason: 'user_not_found' };
+    const row = rows[0];
+
+    // If DB has an email_verified column and it's false, block upgrade
+    if ('email_verified' in row && row.email_verified === false) return { ok: false, reason: 'email_not_verified' };
+
+    // Fall back to auth metadata if available
+    try {
+      const { data: current } = await supabase.auth.getUser();
+      const user = (current as any).data?.user;
+      if (user && user.email) {
+        const provider = (user as any).app_metadata?.provider || (user as any).provider;
+        const isEmail = provider ? String(provider).toLowerCase() === 'email' : true;
+        const emailConfirmed = !!(user as any).email_confirmed_at || !isEmail; // treat OAuth as confirmed
+        if (isEmail && !emailConfirmed) return { ok: false, reason: 'email_not_verified' };
+      }
+    } catch (err) {
+      // ignore - best-effort
+    }
+
+    return { ok: true };
+  } catch (err) {
+    await logAppError('verifyUserForUpgrade', err);
+    return { ok: false, reason: 'exception' };
+  }
+}
+
+/**
  * Sign up a user using Supabase Auth and create a corresponding users row.
  * Enforces duplicate email check per requirements.
  */

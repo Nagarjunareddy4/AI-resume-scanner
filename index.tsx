@@ -72,7 +72,7 @@ const OPENAI_MODEL = "gpt-4o-mini";
 
 // --- Mock Storage Services ---
 
-import { signIn, signUp, getCurrentUser as getCurrentUserFromAuth, setCurrentUser as setCurrentUserToAuth, signOut as authSignOut, canChangePassword, getAuthProvider, updateCurrentUserRole } from './src/services/authService';
+import { signIn, signUp, getCurrentUser as getCurrentUserFromAuth, setCurrentUser as setCurrentUserToAuth, signOut as authSignOut, canChangePassword, getAuthProvider, updateCurrentUserRole, getAuthStatus, resendVerification } from './src/services/authService';
 
 const storage = {
   getUsers: (): UserAccount[] => JSON.parse(localStorage.getItem('resuscan_users') || '[]'),
@@ -202,7 +202,7 @@ const Card = ({ children, className = "", ...props }: { children?: React.ReactNo
 
 // --- Pages ---
 
-const AuthPage = ({ onAuthSuccess, onGuestMode }: any) => {
+const AuthPage = ({ onAuthSuccess, onGuestMode, showToast }: any) => {
   const [isLogin, setIsLogin] = useState(true);
   const [formData, setFormData] = useState({ name: '', email: '', password: '' });
   const [error, setError] = useState('');
@@ -244,6 +244,15 @@ const AuthPage = ({ onAuthSuccess, onGuestMode }: any) => {
         }
         storage.setCurrentUser(res.user.email);
         onAuthSuccess(res.user);
+
+        // Inform user that Supabase sent the verification email (do NOT auto-resend)
+        try {
+          showToast && showToast({ type: 'info', message: 'Verification email sent. Please check your inbox.' });
+          setTimeout(() => showToast && showToast(null), 4500);
+        } catch (e) {
+          console.error('Failed to show verification toast', e);
+        }
+
       } catch (err: any) {
         console.error('Sign-up error:', err);
         setError(err?.message || 'Sign-up failed');
@@ -280,7 +289,7 @@ const AuthPage = ({ onAuthSuccess, onGuestMode }: any) => {
                 }
               }
               // Fallback: inform the user
-              alert('Google sign-in is not available in this environment.');
+              try { showToast && showToast({ type: 'info', message: 'Google sign-in is not available in this environment.' }); setTimeout(() => showToast && showToast(null), 3500); } catch (e) { /* ignore */ }
             } catch (err) {
               console.error('Google sign-in failed', err);
               try { await (await import('./src/services/supabaseClient')).logAppError('googleSignIn', err); } catch (e) { /* ignore */ }
@@ -969,6 +978,10 @@ const App = () => {
   const profileRef = useRef<HTMLDivElement | null>(null);
   const [canChangePw, setCanChangePw] = useState(false);
   const [authProvider, setAuthProvider] = useState<string | null>(null);
+  // Email verification status for subtle UI badges and gating
+  const [isEmailVerified, setIsEmailVerified] = useState<boolean | null>(null);
+  const [isEmailUser, setIsEmailUser] = useState<boolean | null>(null);
+  const [isOAuthUser, setIsOAuthUser] = useState<boolean | null>(null);
 
   // Reset Password modal state (opened from profile dropdown)
   const [resetModalOpen, setResetModalOpen] = useState(false);
@@ -1011,7 +1024,7 @@ const App = () => {
       try {
         // If session is guest, quickly deny (UI passes isGuest state)
         if (isGuest) {
-          if (mounted) { setCanChangePw(false); setAuthProvider(null); }
+          if (mounted) { setCanChangePw(false); setAuthProvider(null); setIsEmailVerified(null); setIsEmailUser(null); setIsOAuthUser(null); }
         } else {
           const cp = await canChangePassword();
           if (mounted) setCanChangePw(!!cp);
@@ -1022,6 +1035,18 @@ const App = () => {
             if (mounted) setAuthProvider(provider ? String(provider).toLowerCase() : null);
           } catch (err) {
             if (mounted) setAuthProvider(null);
+          }
+
+          // Pull auth status (email verified / oauth / email user)
+          try {
+            const status = await getAuthStatus();
+            if (mounted) {
+              setIsEmailVerified(status.isEmailVerified);
+              setIsEmailUser(status.isEmailUser);
+              setIsOAuthUser(status.isOAuthUser);
+            }
+          } catch (err) {
+            if (mounted) { setIsEmailVerified(null); setIsEmailUser(null); setIsOAuthUser(null); }
           }
         }
       } catch (err) {
@@ -1198,7 +1223,8 @@ const App = () => {
           }
         }
         if (!confirmed) {
-          alert('Please verify your email to continue.');
+          setToast({ type: 'info', message: 'Please verify your email to continue.' });
+          setTimeout(() => setToast(null), 3500);
           setPage('dashboard');
           return;
         }
@@ -1272,7 +1298,8 @@ const App = () => {
         setPage('results');
       }
     } catch (err: any) {
-      alert(err.message || "An error occurred during analysis.");
+      setToast({ type: 'error', message: err?.message || 'An error occurred during analysis.' });
+      setTimeout(() => setToast(null), 4500);
       setPage('dashboard');
     }
   };
@@ -1301,16 +1328,51 @@ const App = () => {
 
   const triggerUpgrade = () => setIsUpgradeOpen(true);
 
-  const upgradeToPro = () => {
+  const upgradeToPro = async () => {
     if (!user) {
       setPage('auth');
       setIsUpgradeOpen(false);
       return;
     }
-    const updatedUser = { ...user, plan: 'pro' as Plan };
-    storage.setUsers(storage.getUsers().map(u => u.email === user.email ? updatedUser : u));
-    setUser(updatedUser);
-    setIsUpgradeOpen(false);
+
+    // Get latest auth status (email verified, oauth, guest)
+    try {
+      const status = await getAuthStatus();
+      if (status.isGuest) {
+        // Guests must authenticate before upgrading
+        setPage('auth');
+        setIsUpgradeOpen(false);
+        return;
+      }
+
+      if (status.isEmailUser && !status.isEmailVerified) {
+        // Block upgrade and offer a resend action via toast CTA
+        setToast({
+          type: 'info',
+          message: 'Please verify your email to upgrade to Pro.',
+          actionLabel: 'Resend',
+          action: async () => {
+            setToast({ type: 'info', message: 'Sending verification email...' });
+            const r = await resendVerification(user.email);
+            if (r.error) setToast({ type: 'error', message: r.error?.message || r.error || 'Failed to resend verification email' });
+            else setToast({ type: 'success', message: 'Verification email sent — check your inbox.' });
+            setTimeout(() => setToast(null), 3500);
+          }
+        });
+        return;
+      }
+
+      // Otherwise allow upgrade
+      const updatedUser = { ...user, plan: 'pro' as Plan };
+      storage.setUsers(storage.getUsers().map(u => u.email === user.email ? updatedUser : u));
+      setUser(updatedUser);
+      setIsUpgradeOpen(false);
+    } catch (err: any) {
+      console.error('Upgrade flow error:', err);
+      await logAppError('upgradeToPro:error', err);
+      setToast({ type: 'error', message: 'Failed to start upgrade. Please try again.' });
+      setTimeout(() => setToast(null), 3500);
+    }
   };
 
   // Handler for updating user password extracted from inline JSX for clarity and to avoid nested JSX braces
@@ -1411,6 +1473,22 @@ const App = () => {
                       <div className="px-4 py-2">
                         <div className="text-sm font-bold text-gray-800 dark:text-gray-200 truncate">{user?.name || 'Guest Account'}</div>
                         <div className="text-xs text-gray-500 dark:text-gray-400 truncate">{user?.email || 'guest'}</div>
+
+                        {/* Email verification banner (subtle) */}
+                        {(isEmailUser && isEmailVerified === false) && (
+                          <div className="px-4 py-2">
+                            <div className="rounded-md bg-yellow-50 dark:bg-yellow-900/20 px-3 py-2 text-sm text-yellow-800 dark:text-yellow-200 flex items-center justify-between gap-2">
+                              <div>Verify your email to unlock upgrades.</div>
+                              <button className="text-xs text-yellow-800 dark:text-yellow-200 underline" onClick={async () => {
+                                setToast({ type: 'info', message: 'Sending verification email...' });
+                                const r = await resendVerification(user?.email || '');
+                                if (r.error) setToast({ type: 'error', message: r.error?.message || r.error || 'Failed to resend verification email' });
+                                else setToast({ type: 'success', message: 'Verification email sent — check your inbox.' });
+                                setTimeout(() => setToast(null), 3500);
+                              }}>Resend</button>
+                            </div>
+                          </div>
+                        )}
                       </div>
                       <div className="border-t border-gray-100 dark:border-gray-700 my-1" />
                       {!isGuest && (canChangePw ? (
@@ -1446,7 +1524,12 @@ const App = () => {
 
                 <div className="hidden md:block">
                   <span className="text-sm font-black truncate max-w-[120px] block">{user?.name || "Guest Account"}</span>
-                  <span className="text-[10px] uppercase font-black tracking-widest text-blue-600">{user?.plan || "Trial Mode"}</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] uppercase font-black tracking-widest text-blue-600">{user?.plan || "Trial Mode"}</span>
+                    {(isEmailUser && isEmailVerified === false) && (
+                      <span className="text-[10px] text-yellow-700 bg-yellow-100 dark:bg-yellow-900/30 px-2 py-0.5 rounded-full">Unverified</span>
+                    )}
+                  </div>
                 </div>
               </div>
               <button onClick={handleLogout} className="p-2 text-gray-400 hover:text-red-500 transition-colors" title="Logout"><LogOut className="w-5 h-5" /></button>
@@ -1523,7 +1606,7 @@ const App = () => {
       )}
 
       <main className="pb-24 pt-4">
-        {page === 'auth' && <AuthPage onAuthSuccess={handleAuthSuccess} onGuestMode={() => { setIsGuest(true); setPage('dashboard'); }} />}
+        {page === 'auth' && <AuthPage onAuthSuccess={handleAuthSuccess} onGuestMode={() => { setIsGuest(true); setPage('dashboard'); }} showToast={(t: any) => setToast(t)} /> }
 
         {page === 'reset' && (
           <div className="min-h-screen flex items-center justify-center p-6">
@@ -1627,7 +1710,8 @@ const App = () => {
                   }
 
                   if (!confirmed) {
-                    alert('Please verify your email to continue.');
+                    setToast({ type: 'info', message: 'Please verify your email to continue.' });
+                    setTimeout(() => setToast(null), 3500);
                     return;
                   }
                 } catch (err) {
