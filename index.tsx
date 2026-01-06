@@ -867,7 +867,7 @@ const PrivacyModal = ({ isOpen, onConfirm, onCancel }: any) => {
   );
 };
 
-const UpgradeModal = ({ isOpen, onAuth, onUpgradePro, onCancel }: any) => {
+const UpgradeModal = ({ isOpen, onAuth, onUpgradePro, onCancel, isProcessing = false }: any) => {
   if (!isOpen) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 animate-fade-in">
@@ -898,8 +898,9 @@ const UpgradeModal = ({ isOpen, onAuth, onUpgradePro, onCancel }: any) => {
         </div>
 
         <div className="flex flex-col gap-3">
-          <Button variant="pro" className="w-full py-4 text-lg font-black" onClick={onUpgradePro}>Upgrade to Pro</Button>
+          <Button variant="pro" className="w-full py-4 text-lg font-black" onClick={onUpgradePro} disabled={isProcessing}>{isProcessing ? <><Loader2 className="w-4 h-4 animate-spin" /> Processing...</> : 'Upgrade to Pro'}</Button>
           <Button variant="ghost" className="w-full py-3" onClick={onCancel}>Maybe later</Button>
+          <p className="text-xs text-gray-400 mt-2">Payments are processed in Stripe test mode (India) — use test cards only.</p>
         </div>
       </Card>
     </div>
@@ -1057,31 +1058,48 @@ const App = () => {
           } catch (err) {
             if (mounted) setAuthProvider(null);
           }
-
-          // Pull auth status (email verified / oauth / email user)
-          try {
-            const status = await getAuthStatus();
-            if (mounted) {
-              setIsEmailVerified(status.isEmailVerified);
-              setIsEmailUser(status.isEmailUser);
-              setIsOAuthUser(status.isOAuthUser);
-            }
-          } catch (err) {
-            if (mounted) { setIsEmailVerified(null); setIsEmailUser(null); setIsOAuthUser(null); }
-          }
         }
       } catch (err) {
-        console.error('Failed to determine canChangePassword:', err);
         if (mounted) { setCanChangePw(false); setAuthProvider(null); }
       }
+
+      // --- Additional: detect return from Stripe Checkout (session_id or canceled) ---
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const sessionId = params.get('session_id');
+        const canceled = params.get('canceled');
+        if (sessionId) {
+          setToast({ type: 'info', message: 'Subscription purchase received — it may take a minute to reflect.' });
+          setTimeout(() => setToast(null), 4500);
+          // Try to refresh user now and after a delay to allow webhook to propagate
+          (async () => {
+            try {
+              const refreshed = await getCurrentUserFromAuth();
+              if (refreshed) setUser(refreshed as any);
+            } catch (e) {}
+          })();
+          setTimeout(async () => {
+            try {
+              const refreshed2 = await getCurrentUserFromAuth();
+              if (refreshed2) setUser(refreshed2 as any);
+            } catch (e) {}
+          }, 12000);
+        } else if (canceled) {
+          setToast({ type: 'info', message: 'Checkout canceled' });
+          setTimeout(() => setToast(null), 3500);
+        }
+      } catch (e) {
+        // ignore
+      }
+
     })();
 
-    document.addEventListener('mousedown', onClick);
-    document.addEventListener('keydown', onKey);
+    window.addEventListener('click', onClick);
+    window.addEventListener('keydown', onKey);
     return () => {
       mounted = false;
-      document.removeEventListener('mousedown', onClick);
-      document.removeEventListener('keydown', onKey);
+      window.removeEventListener('click', onClick);
+      window.removeEventListener('keydown', onKey);
     };
   }, [profileOpen, isGuest]);
 
@@ -1359,6 +1377,8 @@ const App = () => {
 
   const triggerUpgrade = () => setIsUpgradeOpen(true);
 
+  const [isUpgradeProcessing, setIsUpgradeProcessing] = useState(false);
+
   const upgradeToPro = async () => {
     if (!user) {
       setPage('auth');
@@ -1366,18 +1386,15 @@ const App = () => {
       return;
     }
 
-    // Get latest auth status (email verified, oauth, guest)
     try {
       const status = await getAuthStatus();
       if (status.isGuest) {
-        // Guests must authenticate before upgrading
         setPage('auth');
         setIsUpgradeOpen(false);
         return;
       }
 
       if (status.isEmailUser && !status.isEmailVerified) {
-        // Block upgrade and offer a resend action via toast CTA
         setToast({
           type: 'info',
           message: 'Please verify your email to upgrade to Pro.',
@@ -1393,16 +1410,52 @@ const App = () => {
         return;
       }
 
-      // Otherwise allow upgrade
-      const updatedUser = { ...user, plan: 'pro' as Plan };
-      storage.setUsers(storage.getUsers().map(u => u.email === user.email ? updatedUser : u));
-      setUser(updatedUser);
-      setIsUpgradeOpen(false);
+      // Inform user that Stripe is in test mode
+      setToast({ type: 'info', message: 'Payments are in test mode. You will be redirected to the test checkout.' });
+      setTimeout(() => setToast(null), 3500);
+
+      setIsUpgradeProcessing(true);
+
+      // Get supabase session access token robustly
+      let token: string | null = null;
+      try {
+        // v2
+        const s = await (supabase.auth as any).getSession?.();
+        token = s && (s as any).data?.session?.access_token;
+      } catch (e) {}
+      if (!token) {
+        // fallback for older versions
+        const s2 = (supabase.auth as any).session?.() || (supabase.auth as any).session;
+        token = s2 && (s2 as any).access_token;
+      }
+
+      if (!token) {
+        setIsUpgradeProcessing(false);
+        setToast({ type: 'error', message: 'No active session. Please sign in and try again.' });
+        setTimeout(() => setToast(null), 3500);
+        return;
+      }
+
+      const resp = await fetch('/api/stripe/create-checkout-session', { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+      const body = await resp.json();
+      if (!resp.ok || !body || !body.url) {
+        console.error('create-checkout error', body);
+        await logAppError('upgradeToPro:create_checkout_failed', body);
+        setIsUpgradeProcessing(false);
+        setToast({ type: 'error', message: body?.error || 'Failed to start checkout session' });
+        setTimeout(() => setToast(null), 3500);
+        return;
+      }
+
+      // Redirect in same tab to Stripe Checkout
+      window.location.href = body.url;
     } catch (err: any) {
       console.error('Upgrade flow error:', err);
       await logAppError('upgradeToPro:error', err);
       setToast({ type: 'error', message: 'Failed to start upgrade. Please try again.' });
       setTimeout(() => setToast(null), 3500);
+    } finally {
+      setIsUpgradeProcessing(false);
     }
   };
 
@@ -1866,7 +1919,7 @@ const App = () => {
       </footer>
 
       <PrivacyModal isOpen={isPrivacyOpen} onConfirm={executeAnalysis} onCancel={() => setIsPrivacyOpen(false)} />
-      <UpgradeModal isOpen={isUpgradeOpen} onUpgradePro={upgradeToPro} onCancel={() => setIsUpgradeOpen(false)} />
+      <UpgradeModal isOpen={isUpgradeOpen} onUpgradePro={upgradeToPro} isProcessing={isUpgradeProcessing} onCancel={() => setIsUpgradeOpen(false)} />
     </div>
   );
 };
