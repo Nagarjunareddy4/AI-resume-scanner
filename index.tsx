@@ -30,7 +30,7 @@ import {
 } from 'lucide-react';
 
 // Supabase integration (best-effort insert of scans and job descriptions)
-import { insertScanRecord, insertJobDescriptionRecord, supabase } from './src/services/supabaseClient';
+import { insertScanRecord, insertJobDescriptionRecord, supabase, logAppError } from './src/services/supabaseClient';
 
 // --- Types & Constants ---
 
@@ -72,9 +72,12 @@ const OPENAI_MODEL = "gpt-4o-mini";
 
 // --- Mock Storage Services ---
 
+import { signIn, signUp, getCurrentUser as getCurrentUserFromAuth, setCurrentUser as setCurrentUserToAuth, signOut as authSignOut, canChangePassword, getAuthProvider, updateCurrentUserRole, getAuthStatus, resendVerification } from './src/services/authService';
+
 const storage = {
   getUsers: (): UserAccount[] => JSON.parse(localStorage.getItem('resuscan_users') || '[]'),
   setUsers: (users: UserAccount[]) => localStorage.setItem('resuscan_users', JSON.stringify(users)),
+  // getCurrentUser is now async-capable in the auth layer; provide a sync shim for legacy uses and use async call where needed.
   getCurrentUser: (): UserAccount | null => {
     const email = localStorage.getItem('resuscan_session');
     if (!email) return null;
@@ -83,6 +86,10 @@ const storage = {
   setCurrentUser: (email: string | null) => {
     if (email) localStorage.setItem('resuscan_session', email);
     else localStorage.removeItem('resuscan_session');
+    // Also inform the auth service in the background (non-blocking)
+    if (!email) {
+      (async () => { try { await authSignOut(); } catch (e) { console.error('Sign-out failed', e); } })();
+    }
   },
   getGuestScans: (): ResumeScan[] => JSON.parse(localStorage.getItem('resuscan_guest_scans') || '[]'),
   setGuestScans: (scans: ResumeScan[]) => localStorage.setItem('resuscan_guest_scans', JSON.stringify(scans)),
@@ -186,7 +193,7 @@ const Button = ({ children, onClick, variant = 'primary', className = '', disabl
 
 const Card = ({ children, className = "", ...props }: { children?: React.ReactNode, className?: string, [key: string]: any }) => (
   <div 
-    className={`bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl overflow-hidden shadow-sm ${className}`}
+    className={`bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl overflow-hidden shadow-sm ${className}`}
     {...props}
   >
     {children}
@@ -195,7 +202,7 @@ const Card = ({ children, className = "", ...props }: { children?: React.ReactNo
 
 // --- Pages ---
 
-const AuthPage = ({ onAuthSuccess, onGuestMode }: any) => {
+const AuthPage = ({ onAuthSuccess, onGuestMode, showToast }: any) => {
   const [isLogin, setIsLogin] = useState(true);
   const [formData, setFormData] = useState({ name: '', email: '', password: '' });
   const [error, setError] = useState('');
@@ -208,28 +215,48 @@ const AuthPage = ({ onAuthSuccess, onGuestMode }: any) => {
   const [resetSent, setResetSent] = useState(false);
 
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
-    const users = storage.getUsers();
 
     if (isLogin) {
-      const user = users.find(u => u.email === formData.email && u.password === formData.password);
-      if (user) {
-        storage.setCurrentUser(user.email);
-        onAuthSuccess(user);
-      } else {
-        setError('Invalid email or password');
+      try {
+        const res: any = await signIn({ email: formData.email, password: formData.password });
+        if (res.error) {
+          setError(res.error);
+          return;
+        }
+        // Persist session in local storage for compatibility and update UI
+        storage.setCurrentUser(res.user.email);
+        onAuthSuccess(res.user);
+      } catch (err: any) {
+        console.error('Sign-in error:', err);
+        setError(err?.message || 'Sign-in failed');
       }
+
     } else {
-      if (users.find(u => u.email === formData.email)) {
-        setError('Email already registered');
-        return;
+      try {
+
+        const res: any = await signUp({ name: formData.name, email: formData.email, password: formData.password, role: 'candidate' });
+        if (res.error) {
+          setError(res.error);
+          return;
+        }
+        storage.setCurrentUser(res.user.email);
+        onAuthSuccess(res.user);
+
+        // Inform user that Supabase sent the verification email (do NOT auto-resend)
+        try {
+          showToast && showToast({ type: 'info', message: 'Verification email sent. Please check your inbox.' });
+          setTimeout(() => showToast && showToast(null), 4500);
+        } catch (e) {
+          console.error('Failed to show verification toast', e);
+        }
+
+      } catch (err: any) {
+        console.error('Sign-up error:', err);
+        setError(err?.message || 'Sign-up failed');
       }
-      const newUser: UserAccount = { ...formData, scans: [], plan: 'free' };
-      storage.setUsers([...users, newUser]);
-      storage.setCurrentUser(newUser.email);
-      onAuthSuccess(newUser);
     }
   };
 
@@ -237,13 +264,52 @@ const AuthPage = ({ onAuthSuccess, onGuestMode }: any) => {
     <div className="min-h-screen flex items-center justify-center p-6 bg-gray-50 dark:bg-black animate-fade-up">
       <Card className="w-full max-w-md p-8">
         <div className="flex flex-col items-center mb-8">
-          <div className="w-12 h-12 bg-blue-600 rounded-xl flex items-center justify-center mb-4 shadow-lg shadow-blue-500/20">
+          <div className="w-12 h-12 bg-blue-600 rounded-2xl flex items-center justify-center mb-4 shadow-lg shadow-blue-500/20">
             <ShieldCheck className="text-white w-8 h-8" />
           </div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white">{isLogin ? 'Sign In' : 'Create Account'}</h1>
           <p className="text-gray-500 dark:text-gray-400 mt-2 text-center text-sm">
             AI-powered resume analysis with industry-standard privacy.
           </p>
+        </div>
+
+        <div className="space-y-4">
+          <Button variant="primary" className="w-full flex items-center justify-center gap-3" onClick={async () => {
+            try {
+              if (supabase && supabase.auth) {
+                // Modern supabase client
+                if (typeof (supabase.auth as any).signInWithOAuth === 'function') {
+                  await (supabase.auth as any).signInWithOAuth({ provider: 'google' });
+                  return;
+                }
+                // Older client compatibility
+                if (typeof (supabase.auth as any).signInWithProvider === 'function') {
+                  await (supabase.auth as any).signInWithProvider('google');
+                  return;
+                }
+              }
+              // Fallback: inform the user
+              try { showToast && showToast({ type: 'info', message: 'Google sign-in is not available in this environment.' }); setTimeout(() => showToast && showToast(null), 3500); } catch (e) { /* ignore */ }
+            } catch (err) {
+              console.error('Google sign-in failed', err);
+              try { await (await import('./src/services/supabaseClient')).logAppError('googleSignIn', err); } catch (e) { /* ignore */ }
+            }
+          }}>
+            {/* Simple Google 'G' svg */}
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="w-4 h-4">
+              <path d="M21.6 12.227c0-.667-.06-1.307-.172-1.927H12v3.648h5.52c-.237 1.28-.96 2.366-2.048 3.09v2.573h3.31c1.938-1.786 3.058-4.41 3.058-7.384z" fill="#4285F4"/>
+              <path d="M12 22c2.64 0 4.856-.874 6.475-2.373l-3.31-2.573c-.917.616-2.08.983-3.165.983-2.43 0-4.49-1.64-5.23-3.846H3.183v2.42C4.8 19.92 8.12 22 12 22z" fill="#34A853"/>
+              <path d="M6.77 13.191a6.6 6.6 0 010-4.383V6.388H3.183a9.997 9.997 0 000 11.224l3.587-2.42z" fill="#FBBC05"/>
+              <path d="M12 6.017c1.436 0 2.73.494 3.752 1.462l2.81-2.81C16.86 2.77 14.64 2 12 2 8.12 2 4.8 4.08 3.183 6.388l3.587 2.42C7.51 7.657 9.57 6.017 12 6.017z" fill="#EA4335"/>
+            </svg>
+            Continue with Google
+          </Button>
+
+          <div className="w-full flex items-center gap-2">
+            <div className="h-px bg-gray-200 dark:bg-gray-800 flex-1"></div>
+            <span className="text-xs text-gray-400 font-medium">OR</span>
+            <div className="h-px bg-gray-200 dark:bg-gray-800 flex-1"></div>
+          </div>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -317,6 +383,7 @@ const AuthPage = ({ onAuthSuccess, onGuestMode }: any) => {
 
                             if (res.error) {
                               console.error('Supabase reset error:', res.error);
+                              try { await (await import('./src/services/supabaseClient')).logAppError('passwordReset', res.error); } catch (e) { /* ignore */ }
                               setResetError('Failed to send reset link. Please try again later.');
                             } else {
                               setResetSent(true);
@@ -349,11 +416,6 @@ const AuthPage = ({ onAuthSuccess, onGuestMode }: any) => {
           <button onClick={() => setIsLogin(!isLogin)} className="text-sm text-blue-600 hover:underline font-medium">
             {isLogin ? "Don't have an account? Sign Up" : "Already have an account? Sign In"}
           </button>
-          <div className="w-full flex items-center gap-2">
-            <div className="h-px bg-gray-200 dark:bg-gray-800 flex-1"></div>
-            <span className="text-xs text-gray-400 font-medium">OR</span>
-            <div className="h-px bg-gray-200 dark:bg-gray-800 flex-1"></div>
-          </div>
           <button onClick={onGuestMode} className="flex items-center gap-2 text-sm font-semibold text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
             Try for free as Guest <ArrowRight className="w-4 h-4" />
           </button>
@@ -363,7 +425,7 @@ const AuthPage = ({ onAuthSuccess, onGuestMode }: any) => {
   );
 };
 
-const Dashboard = ({ user, scans, isGuest, role, setRole, onNewScan, onViewScan, onAuthRequired, onTriggerUpgrade }: any) => {
+const Dashboard = ({ user, scans, isGuest, role, setRole, setUser, onNewScan, onViewScan, onAuthRequired, onTriggerUpgrade, showToast }: any) => {
   const displayName = user ? user.name : "Guest";
   const isPro = user?.plan === 'pro';
   
@@ -372,7 +434,7 @@ const Dashboard = ({ user, scans, isGuest, role, setRole, onNewScan, onViewScan,
       {isGuest && (
         <div className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white px-6 py-5 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xl shadow-blue-500/20">
           <div className="flex items-center gap-4">
-            <div className="w-12 h-12 bg-white/20 rounded-xl flex items-center justify-center backdrop-blur-sm"><Sparkles className="w-6 h-6" /></div>
+            <div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center backdrop-blur-sm"><Sparkles className="w-6 h-6" /></div>
             <div>
               <p className="font-bold text-lg">You are in Guest Mode</p>
               <p className="text-sm opacity-90">Sign up to save history and unlock unlimited scans.</p>
@@ -398,7 +460,7 @@ const Dashboard = ({ user, scans, isGuest, role, setRole, onNewScan, onViewScan,
           <p className="text-gray-500 dark:text-gray-400">Your AI insights are ready.</p>
         </div>
         
-        <div className="bg-gray-100 dark:bg-gray-800 p-1 rounded-xl flex gap-1 self-start shadow-inner">
+        <div className="bg-gray-100 dark:bg-gray-800 p-1 rounded-2xl flex gap-1 self-start shadow-inner">
           <button 
             onClick={() => setRole('candidate')}
             className={`flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-bold transition-all ${role === 'candidate' ? 'bg-white dark:bg-gray-900 text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
@@ -406,12 +468,38 @@ const Dashboard = ({ user, scans, isGuest, role, setRole, onNewScan, onViewScan,
             <UserCheck className="w-4 h-4" /> Candidate
           </button>
           <button 
-            onClick={() => setRole('recruiter')}
-            className={`flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-bold transition-all ${role === 'recruiter' ? 'bg-white dark:bg-gray-900 text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+            onClick={async () => {
+              if (isGuest) { onAuthRequired(); return; }
+              if (!isPro) {
+                showToast({ type: 'info', message: 'Recruiter role requires a Pro upgrade', actionLabel: 'Upgrade', action: () => { onTriggerUpgrade(); showToast(null); } });
+                setTimeout(() => showToast(null), 6000);
+                return;
+              }
+
+              try {
+                if (user && user.id) {
+                  const res: any = await updateCurrentUserRole('recruiter');
+                  if (res.error) { showToast({ type: 'error', message: res.error }); setTimeout(() => showToast(null), 6000); return; }
+                  setUser(res.user);
+                }
+                setRole('recruiter');
+                showToast({ type: 'success', message: 'Role updated to Recruiter' });
+                setTimeout(() => showToast(null), 3500);
+              } catch (err) {
+                console.error('Failed to set recruiter role:', err);
+                showToast({ type: 'error', message: 'Failed to set recruiter role. Please try again.' });
+                setTimeout(() => showToast(null), 6000);
+              }
+            }}
+            className={`flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-bold transition-all ${role === 'recruiter' ? 'bg-white dark:bg-gray-900 text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'} ${!isPro ? 'opacity-60 cursor-not-allowed' : ''}`}
+            disabled={!isPro}
           >
             <Briefcase className="w-4 h-4" /> Recruiter
           </button>
         </div>
+        {!isPro && !isGuest && (
+          <div className="mt-2 text-xs text-gray-500">Recruiter role requires a <button onClick={onTriggerUpgrade} className="text-blue-600 underline">Pro upgrade</button>.</div>
+        )}
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -454,7 +542,7 @@ const Dashboard = ({ user, scans, isGuest, role, setRole, onNewScan, onViewScan,
             {scans.slice().reverse().map((scan: any) => (
               <Card key={scan.id} className="p-5 flex items-center justify-between group hover:border-blue-300 dark:hover:border-blue-800 transition-all cursor-pointer" onClick={() => onViewScan(scan)}>
                 <div className="flex items-center gap-4">
-                  <div className="p-3 bg-gray-100 dark:bg-gray-800 rounded-xl group-hover:bg-blue-50 dark:group-hover:bg-blue-900/30 transition-colors"><FileText className="w-6 h-6 text-blue-600" /></div>
+                  <div className="p-3 bg-gray-100 dark:bg-gray-800 rounded-2xl group-hover:bg-blue-50 dark:group-hover:bg-blue-900/30 transition-colors"><FileText className="w-6 h-6 text-blue-600" /></div>
                   <div>
                     <h4 className="font-bold text-gray-900 dark:text-white group-hover:text-blue-600 transition-colors">{scan.fileName}</h4>
                     <p className="text-[10px] text-gray-500 uppercase font-bold tracking-widest">{new Date(scan.timestamp).toLocaleString()} • {scan.role}</p>
@@ -554,7 +642,7 @@ const UploadSection = ({ role, user, isGuest, onAnalyze, onTriggerUpgrade }: any
             {jdMode === 'type' ? (
               <textarea
                 placeholder="Paste or type the job description here (optional). If provided, this text will be used for analysis instead of uploaded JD file."
-                className="w-full px-4 py-3 rounded-xl border dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none transition-all shadow-sm"
+                className="w-full px-4 py-3 rounded-2xl border dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none transition-all shadow-sm"
                 value={jdText}
                 onChange={(e) => setJdText(e.target.value)}
                 rows={4}
@@ -562,7 +650,7 @@ const UploadSection = ({ role, user, isGuest, onAnalyze, onTriggerUpgrade }: any
             ) : (
               // Upload mode
               jdFile ? (
-                <div className="flex items-center gap-4 w-full p-4 bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-green-100">
+                <div className="flex items-center gap-4 w-full p-4 bg-white dark:bg-gray-800 rounded-2xl shadow-sm border border-green-100">
                   <CheckCircle2 className="w-8 h-8 text-green-500" />
                   <span className="truncate flex-1 font-bold text-gray-800 dark:text-gray-200">{jdFile.name}</span>
                   <button onClick={() => setJdFile(null)} className="p-2 hover:bg-red-50 rounded-full text-gray-400 hover:text-red-500 transition-colors"><X className="w-5 h-5" /></button>
@@ -608,7 +696,7 @@ const UploadSection = ({ role, user, isGuest, onAnalyze, onTriggerUpgrade }: any
 
             {resumes.length > 0 ? (
               <div className="w-full space-y-3">
-                <div className="flex items-center justify-between p-3 bg-green-50 dark:bg-green-900/20 rounded-xl border border-green-100">
+                <div className="flex items-center justify-between p-3 bg-green-50 dark:bg-green-900/20 rounded-2xl border border-green-100">
                   <span className="text-sm font-black text-green-700 dark:text-green-400">{resumes.length} File(s) Selected</span>
                   <button onClick={() => setResumes([])} className="p-2 hover:bg-red-50 rounded-full text-gray-400 hover:text-red-500 transition-colors"><X className="w-4 h-4" /></button>
                 </div>
@@ -653,7 +741,7 @@ const UploadSection = ({ role, user, isGuest, onAnalyze, onTriggerUpgrade }: any
           <input 
             type="text" 
             placeholder="e.g. Nagarjuna Reddy" 
-            className="w-full px-5 py-3 rounded-xl border dark:border-gray-700 bg-white dark:bg-gray-800 focus:ring-2 focus:ring-blue-500 outline-none transition-all shadow-sm"
+            className="w-full px-5 py-3 rounded-2xl border dark:border-gray-700 bg-white dark:bg-gray-800 focus:ring-2 focus:ring-blue-500 outline-none transition-all shadow-sm"
             value={guestName}
             onChange={(e) => setGuestName(e.target.value)}
           />
@@ -692,7 +780,7 @@ const RecruiterResults = ({ results, isPro, onBack, onExport, onTriggerUpgrade }
       </div>
 
       <div className="flex items-center gap-4">
-        <div className="w-10 h-10 bg-blue-100 dark:bg-blue-900/30 rounded-xl flex items-center justify-center text-blue-600"><Briefcase className="w-6 h-6" /></div>
+        <div className="w-10 h-10 bg-blue-100 dark:bg-blue-900/30 rounded-2xl flex items-center justify-center text-blue-600"><Briefcase className="w-6 h-6" /></div>
         <h2 className="text-3xl font-extrabold">Screening Results ({results.length} Candidates)</h2>
       </div>
 
@@ -812,26 +900,30 @@ const getPasswordScore = (pw: string) => {
 };
 
 // Reusable password input with emoji toggle
-const PasswordInput = ({ value, onChange, id, placeholder }: any) => {
+const PasswordInput = ({ value, onChange, id, placeholder, disabled, inputRefProp }: any) => {
   const [visible, setVisible] = useState(false);
-  const inputRef = useRef<HTMLInputElement | null>(null);
+  const localRef = useRef<HTMLInputElement | null>(null);
+  const refToUse = inputRefProp || localRef;
   return (
     <div className="relative">
       <input
         id={id}
-        ref={inputRef}
+        ref={refToUse}
+        disabled={disabled}
         type={visible ? 'text' : 'password'}
         value={value}
         onChange={onChange}
         placeholder={placeholder}
-        className="w-full px-4 py-2 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+        aria-invalid={disabled ? undefined : undefined}
+        className={`w-full px-4 py-3 rounded-2xl border dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none transition-all ${disabled ? 'opacity-60 cursor-not-allowed' : ''}`}
       />
       <button
         type="button"
         aria-label={visible ? 'Hide password' : 'Show password'}
         onMouseDown={(e) => e.preventDefault()} // prevent blur
         onClick={() => setVisible(v => !v)}
-        className="absolute right-3 top-1/2 -translate-y-1/2 text-sm cursor-pointer select-none opacity-70 hover:opacity-100 transition-opacity"
+        disabled={disabled}
+        className={`absolute right-3 top-1/2 -translate-y-1/2 text-sm cursor-pointer select-none opacity-70 hover:opacity-100 transition-opacity ${disabled ? 'pointer-events-none opacity-40' : ''}`}
         style={{ lineHeight: 1 }}
       >
         {visible ? '👁️' : '🙈'}
@@ -847,7 +939,7 @@ const StrengthMeter = ({ password }: any) => {
   return (
     <div className="mt-2">
       <div className="w-full bg-gray-100 dark:bg-gray-800 h-2 rounded-full overflow-hidden">
-        <div className={`${colorClass} h-2`} style={{ width: `${pct}%` }} />
+        <div className={`${colorClass} h-2 transition-all duration-500 ease-out`} style={{ width: `${pct}%` }} />
       </div>
       <div className="mt-1 text-xs font-bold text-gray-600 dark:text-gray-300">{label}</div>
     </div>
@@ -884,6 +976,12 @@ const App = () => {
   // Profile dropdown state & handlers (minimal, accessible)
   const [profileOpen, setProfileOpen] = useState(false);
   const profileRef = useRef<HTMLDivElement | null>(null);
+  const [canChangePw, setCanChangePw] = useState(false);
+  const [authProvider, setAuthProvider] = useState<string | null>(null);
+  // Email verification status for subtle UI badges and gating
+  const [isEmailVerified, setIsEmailVerified] = useState<boolean | null>(null);
+  const [isEmailUser, setIsEmailUser] = useState<boolean | null>(null);
+  const [isOAuthUser, setIsOAuthUser] = useState<boolean | null>(null);
 
   // Reset Password modal state (opened from profile dropdown)
   const [resetModalOpen, setResetModalOpen] = useState(false);
@@ -902,25 +1000,69 @@ const App = () => {
   const [cpNew, setCpNew] = useState('');
   const [cpConfirm, setCpConfirm] = useState('');
   const [cpError, setCpError] = useState<string | null>(null);
+  const [cpOldError, setCpOldError] = useState<string | null>(null);
+  const [cpNewError, setCpNewError] = useState<string | null>(null);
+  const [cpConfirmError, setCpConfirmError] = useState<string | null>(null);
+  const [cpProcessing, setCpProcessing] = useState(false);
+  const cpOldRef = useRef<HTMLInputElement | null>(null);
 
-  // Success message banner
-  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  // Toast system (replaces previous single successMessage)
+  const [toast, setToast] = useState<null | { type: 'success' | 'info' | 'error', message: string, actionLabel?: string, action?: () => void }>(null);
 
   useEffect(() => {
     if (!profileOpen) return;
+    let mounted = true;
     const onClick = (e: MouseEvent) => {
       if (profileRef.current && !profileRef.current.contains(e.target as Node)) setProfileOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setProfileOpen(false);
     };
+
+    // Compute whether change password should be shown and detect auth provider for OAuth users
+    (async () => {
+      try {
+        // If session is guest, quickly deny (UI passes isGuest state)
+        if (isGuest) {
+          if (mounted) { setCanChangePw(false); setAuthProvider(null); setIsEmailVerified(null); setIsEmailUser(null); setIsOAuthUser(null); }
+        } else {
+          const cp = await canChangePassword();
+          if (mounted) setCanChangePw(!!cp);
+
+          // Determine provider (google/github/email/other) for informational UI
+          try {
+            const provider = await getAuthProvider();
+            if (mounted) setAuthProvider(provider ? String(provider).toLowerCase() : null);
+          } catch (err) {
+            if (mounted) setAuthProvider(null);
+          }
+
+          // Pull auth status (email verified / oauth / email user)
+          try {
+            const status = await getAuthStatus();
+            if (mounted) {
+              setIsEmailVerified(status.isEmailVerified);
+              setIsEmailUser(status.isEmailUser);
+              setIsOAuthUser(status.isOAuthUser);
+            }
+          } catch (err) {
+            if (mounted) { setIsEmailVerified(null); setIsEmailUser(null); setIsOAuthUser(null); }
+          }
+        }
+      } catch (err) {
+        console.error('Failed to determine canChangePassword:', err);
+        if (mounted) { setCanChangePw(false); setAuthProvider(null); }
+      }
+    })();
+
     document.addEventListener('mousedown', onClick);
     document.addEventListener('keydown', onKey);
     return () => {
+      mounted = false;
       document.removeEventListener('mousedown', onClick);
       document.removeEventListener('keydown', onKey);
     };
-  }, [profileOpen]);
+  }, [profileOpen, isGuest]);
 
   // Close reset modal on Escape or outside click
   useEffect(() => {
@@ -939,6 +1081,18 @@ const App = () => {
       document.removeEventListener('keydown', onKey);
     };
   }, [resetModalOpen]);
+
+  // Focus first input when change password modal opens
+  useEffect(() => {
+    if (!changePwOpen) return;
+    setTimeout(() => { try { cpOldRef.current?.focus(); } catch (e) { /* ignore */ } }, 80);
+  }, [changePwOpen]);
+
+  // Reset change password state when dialog closes
+  useEffect(() => {
+    if (changePwOpen) return;
+    setCpOld(''); setCpNew(''); setCpConfirm(''); setCpError(null); setCpOldError(null); setCpNewError(null); setCpConfirmError(null); setCpProcessing(false);
+  }, [changePwOpen]);
 
   // Manage body scroll lock and ESC handling for change password modal, plus focus trap
   useEffect(() => {
@@ -984,10 +1138,22 @@ const App = () => {
   const [recruiterResults, setRecruiterResults] = useState<ResumeScan[]>([]);
 
   useEffect(() => {
-    const session = storage.getCurrentUser();
-    const guests = storage.getGuestScans();
-    setGuestScans(guests);
-    if (session) { setUser(session); setIsGuest(false); setPage('dashboard'); }
+    (async () => {
+      const guests = storage.getGuestScans();
+      setGuestScans(guests);
+
+      try {
+        const svcUser = await getCurrentUserFromAuth();
+        if (svcUser) { setUser(svcUser); setIsGuest(false); setPage('dashboard'); return; }
+      } catch (err) {
+        // Log but don't block UX
+        console.error('Failed fetching current user from auth service:', err);
+      }
+
+      // Fallback to local storage session (for guest/dev flows)
+      const session = storage.getCurrentUser();
+      if (session) { setUser(session); setIsGuest(false); setPage('dashboard'); }
+    })();
 
     // Detect Supabase reset link in URL: if present, show dedicated Reset Password page
     try {
@@ -1057,7 +1223,8 @@ const App = () => {
           }
         }
         if (!confirmed) {
-          alert('Please verify your email to continue.');
+          setToast({ type: 'info', message: 'Please verify your email to continue.' });
+          setTimeout(() => setToast(null), 3500);
           setPage('dashboard');
           return;
         }
@@ -1131,7 +1298,8 @@ const App = () => {
         setPage('results');
       }
     } catch (err: any) {
-      alert(err.message || "An error occurred during analysis.");
+      setToast({ type: 'error', message: err?.message || 'An error occurred during analysis.' });
+      setTimeout(() => setToast(null), 4500);
       setPage('dashboard');
     }
   };
@@ -1160,16 +1328,114 @@ const App = () => {
 
   const triggerUpgrade = () => setIsUpgradeOpen(true);
 
-  const upgradeToPro = () => {
+  const upgradeToPro = async () => {
     if (!user) {
       setPage('auth');
       setIsUpgradeOpen(false);
       return;
     }
-    const updatedUser = { ...user, plan: 'pro' as Plan };
-    storage.setUsers(storage.getUsers().map(u => u.email === user.email ? updatedUser : u));
-    setUser(updatedUser);
-    setIsUpgradeOpen(false);
+
+    // Get latest auth status (email verified, oauth, guest)
+    try {
+      const status = await getAuthStatus();
+      if (status.isGuest) {
+        // Guests must authenticate before upgrading
+        setPage('auth');
+        setIsUpgradeOpen(false);
+        return;
+      }
+
+      if (status.isEmailUser && !status.isEmailVerified) {
+        // Block upgrade and offer a resend action via toast CTA
+        setToast({
+          type: 'info',
+          message: 'Please verify your email to upgrade to Pro.',
+          actionLabel: 'Resend',
+          action: async () => {
+            setToast({ type: 'info', message: 'Sending verification email...' });
+            const r = await resendVerification(user.email);
+            if (r.error) setToast({ type: 'error', message: r.error?.message || r.error || 'Failed to resend verification email' });
+            else setToast({ type: 'success', message: 'Verification email sent — check your inbox.' });
+            setTimeout(() => setToast(null), 3500);
+          }
+        });
+        return;
+      }
+
+      // Otherwise allow upgrade
+      const updatedUser = { ...user, plan: 'pro' as Plan };
+      storage.setUsers(storage.getUsers().map(u => u.email === user.email ? updatedUser : u));
+      setUser(updatedUser);
+      setIsUpgradeOpen(false);
+    } catch (err: any) {
+      console.error('Upgrade flow error:', err);
+      await logAppError('upgradeToPro:error', err);
+      setToast({ type: 'error', message: 'Failed to start upgrade. Please try again.' });
+      setTimeout(() => setToast(null), 3500);
+    }
+  };
+
+  // Handler for updating user password extracted from inline JSX for clarity and to avoid nested JSX braces
+  const handleChangePassword = async () => {
+    setCpError(null); setCpOldError(null); setCpNewError(null); setCpConfirmError(null);
+
+    // Front-end validation (visual only)
+    if (!cpOld) { setCpOldError('Please enter your current password.'); return; }
+    if (!cpNew) { setCpNewError('Please enter a new password.'); return; }
+    if (!cpConfirm) { setCpConfirmError('Please confirm your new password.'); return; }
+    if (cpNew !== cpConfirm) { setCpConfirmError('Passwords do not match.'); return; }
+
+    setCpProcessing(true);
+
+    // First try local storage change for local accounts
+    try {
+      const users = storage.getUsers();
+      const idx = users.findIndex(u => u.email === user?.email);
+      if (idx !== -1 && users[idx].password === cpOld) {
+        users[idx].password = cpNew;
+        storage.setUsers(users);
+        setChangePwOpen(false);
+        setToast({ type: 'success', message: 'Password changed successfully' });
+        setTimeout(() => setToast(null), 3500);
+        setCpProcessing(false);
+        return;
+      }
+    } catch (err) {
+      console.error('Local password update error:', err);
+      try { await logAppError('changePassword:local', err); } catch (e) { /* ignore */ }
+      // continue to try Supabase if available
+    }
+
+    // Otherwise, attempt Supabase update for authenticated users
+    try {
+      if (supabase && supabase.auth) {
+        // Attempt modern API first
+        if (typeof (supabase.auth as any).updateUser === 'function') {
+          const { data, error } = await (supabase.auth as any).updateUser({ password: cpNew });
+          if (error) { setCpError('Failed to update password.'); await logAppError('changePassword:updateUser', error); setCpProcessing(false); return; }
+          setChangePwOpen(false);
+          setToast({ type: 'success', message: 'Password changed successfully' });
+          setTimeout(() => setToast(null), 3500);
+          setCpProcessing(false);
+          return;
+        } else if (typeof (supabase.auth as any).update === 'function') {
+          const { data, error } = await (supabase.auth as any).update({ password: cpNew });
+          if (error) { setCpError('Failed to update password.'); await logAppError('changePassword:update', error); setCpProcessing(false); return; }
+          setChangePwOpen(false);
+          setToast({ type: 'success', message: 'Password changed successfully' });
+          setTimeout(() => setToast(null), 3500);
+          setCpProcessing(false);
+          return;
+        }
+      }
+      setCpError('Password update is not available in this environment.');
+      await logAppError('changePassword:notAvailable', new Error('Password update not available'));
+    } catch (err) {
+      console.error('Supabase password update error:', err);
+      await logAppError('changePassword:exception', err);
+      setCpError('Failed to update password. Please try again.');
+    }
+    setCpProcessing(false);
   };
 
   return (
@@ -1177,7 +1443,7 @@ const App = () => {
       {(user || isGuest) && (
         <header className="sticky top-0 z-40 bg-white/80 dark:bg-black/80 backdrop-blur-md border-b dark:border-gray-800 px-6 py-4 flex justify-between items-center animate-fade-in shadow-sm">
           <div className="flex items-center gap-3 cursor-pointer group" onClick={() => setPage('dashboard')}>
-            <div className="w-9 h-9 bg-blue-600 rounded-xl flex items-center justify-center shadow-lg shadow-blue-500/30 group-hover:scale-105 transition-transform"><ShieldCheck className="text-white w-6 h-6" /></div>
+            <div className="w-9 h-9 bg-blue-600 rounded-2xl flex items-center justify-center shadow-lg shadow-blue-500/30 group-hover:scale-105 transition-transform"><ShieldCheck className="text-white w-6 h-6" /></div>
             <h1 className="text-xl font-black tracking-tight">{APP_NAME}</h1>
           </div>
           <div className="flex items-center gap-6">
@@ -1207,18 +1473,45 @@ const App = () => {
                       <div className="px-4 py-2">
                         <div className="text-sm font-bold text-gray-800 dark:text-gray-200 truncate">{user?.name || 'Guest Account'}</div>
                         <div className="text-xs text-gray-500 dark:text-gray-400 truncate">{user?.email || 'guest'}</div>
+
+                        {/* Email verification banner (subtle) */}
+                        {(isEmailUser && isEmailVerified === false) && (
+                          <div className="px-4 py-2">
+                            <div className="rounded-md bg-yellow-50 dark:bg-yellow-900/20 px-3 py-2 text-sm text-yellow-800 dark:text-yellow-200 flex items-center justify-between gap-2">
+                              <div>Verify your email to unlock upgrades.</div>
+                              <button className="text-xs text-yellow-800 dark:text-yellow-200 underline" onClick={async () => {
+                                setToast({ type: 'info', message: 'Sending verification email...' });
+                                const r = await resendVerification(user?.email || '');
+                                if (r.error) setToast({ type: 'error', message: r.error?.message || r.error || 'Failed to resend verification email' });
+                                else setToast({ type: 'success', message: 'Verification email sent — check your inbox.' });
+                                setTimeout(() => setToast(null), 3500);
+                              }}>Resend</button>
+                            </div>
+                          </div>
+                        )}
                       </div>
                       <div className="border-t border-gray-100 dark:border-gray-700 my-1" />
-                      <button
-                        className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-                        onClick={() => {
-                          setProfileOpen(false);
-                          setCpOld(''); setCpNew(''); setCpConfirm(''); setCpError(null);
-                          setChangePwOpen(true);
-                        }}
-                      >
-                        Change Password
-                      </button>
+                      {!isGuest && (canChangePw ? (
+                        <button
+                          className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+                          onClick={() => {
+                            setProfileOpen(false);
+                            setCpOld(''); setCpNew(''); setCpConfirm(''); setCpError(null);
+                            setChangePwOpen(true);
+                          }}
+                        >
+                          Change Password
+                        </button>
+                      ) : (
+                        // If provider is OAuth, show an informational card
+                        (authProvider === 'google' || authProvider === 'github') ? (
+                          <div className="w-full px-4 py-2">
+                            <div className="rounded-md bg-gray-100 dark:bg-gray-700 px-3 py-2 text-sm text-gray-700 dark:text-gray-200">
+                              {authProvider === 'google' ? 'Managed by Google' : 'Managed by GitHub'}
+                            </div>
+                          </div>
+                        ) : null
+                      ))}
                       <button
                         className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
                         onClick={() => { setProfileOpen(false); handleLogout(); }}
@@ -1231,7 +1524,12 @@ const App = () => {
 
                 <div className="hidden md:block">
                   <span className="text-sm font-black truncate max-w-[120px] block">{user?.name || "Guest Account"}</span>
-                  <span className="text-[10px] uppercase font-black tracking-widest text-blue-600">{user?.plan || "Trial Mode"}</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] uppercase font-black tracking-widest text-blue-600">{user?.plan || "Trial Mode"}</span>
+                    {(isEmailUser && isEmailVerified === false) && (
+                      <span className="text-[10px] text-yellow-700 bg-yellow-100 dark:bg-yellow-900/30 px-2 py-0.5 rounded-full">Unverified</span>
+                    )}
+                  </div>
                 </div>
               </div>
               <button onClick={handleLogout} className="p-2 text-gray-400 hover:text-red-500 transition-colors" title="Logout"><LogOut className="w-5 h-5" /></button>
@@ -1241,94 +1539,74 @@ const App = () => {
       )}
 
       {/* Reset Password Modal */}
-      {changePwOpen && (
+{changePwOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-          <div id="change-pw-modal" className="w-full max-w-md p-6 animate-fade-up transform transition-all">
-            <Card>
-              <div className="mb-4">
-                <h3 className="text-lg font-bold">Change Password</h3>
-                <p className="text-sm text-gray-500">Enter your current password and set a new password.</p>
-              </div>
-
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Old Password</label>
-                  <PasswordInput id="old-pw" value={cpOld} onChange={(e: any) => setCpOld(e.target.value)} placeholder="Current password" />
+          <div id="change-pw-modal" className="w-full max-w-lg p-6 animate-fade-up transform transition-all">
+            <div className="rounded-2xl p-[1px] bg-gradient-to-tr from-blue-600/50 via-indigo-600/30 to-transparent shadow-2xl">
+              <Card className="rounded-2xl ring-1 ring-white/5 shadow-none backdrop-blur-sm overflow-hidden">
+<div className="rounded-t-2xl bg-white/3 dark:bg-white/4 border-b border-gray-100/5 dark:border-white/6 p-4 mb-4">
+                <div className="flex items-start gap-4">
+                  <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
+                    <Lock className="w-6 h-6 text-white" />
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="text-xl font-extrabold">Change Password</h3>
+                    <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Enter your current password and set a new one.</p>
+                  </div>
+                  </div>
                 </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">New Password</label>
-                  <PasswordInput id="new-pw" value={cpNew} onChange={(e: any) => setCpNew(e.target.value)} placeholder="New password" />
-                  <StrengthMeter password={cpNew} />
-                </div>
+                <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); /* submission handled by handler */ }}>
+                  <div>
+                    <label htmlFor="old-pw" className="block text-xs font-bold text-gray-700 dark:text-gray-300 mb-2">Current Password</label>
+                    <PasswordInput id="old-pw" inputRefProp={cpOldRef} value={cpOld} onChange={(e: any) => setCpOld(e.target.value)} placeholder="Enter current password" disabled={cpProcessing} />
+                    <div className={`mt-2 text-sm text-red-500 transition-all duration-200 ${cpOldError ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-2'}`} aria-live="polite">{cpOldError}</div>
+                  </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Confirm New Password</label>
-                  <PasswordInput id="confirm-pw" value={cpConfirm} onChange={(e: any) => setCpConfirm(e.target.value)} placeholder="Confirm new password" />
-                </div>
+                  <div>
+                    <label htmlFor="new-pw" className="block text-xs font-bold text-gray-700 dark:text-gray-300 mb-2">New Password</label>
+                    <PasswordInput id="new-pw" value={cpNew} onChange={(e: any) => setCpNew(e.target.value)} placeholder="Create a new password" disabled={cpProcessing} />
+                    <StrengthMeter password={cpNew} />
+                    <div className={`mt-2 text-sm text-red-500 transition-all duration-200 ${cpNewError ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-2'}`} aria-live="polite">{cpNewError}</div>
+                  </div>
 
-                {cpError && <div className="text-red-500 text-sm">{cpError}</div>}
+                  <div>
+                    <label htmlFor="confirm-pw" className="block text-xs font-bold text-gray-700 dark:text-gray-300 mb-2">Confirm New Password</label>
+                    <PasswordInput id="confirm-pw" value={cpConfirm} onChange={(e: any) => setCpConfirm(e.target.value)} placeholder="Confirm new password" disabled={cpProcessing} />
+                    <div className={`mt-2 text-sm text-red-500 transition-all duration-200 ${cpConfirmError ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-2'}`} aria-live="polite">{cpConfirmError}</div>
+                  </div>
 
-                <div className="flex items-center gap-2 justify-end">
-                  <Button variant="ghost" onClick={() => setChangePwOpen(false)}>Cancel</Button>
-                  <Button onClick={async () => {
-                    setCpError(null);
-                    if (!cpOld || !cpNew || !cpConfirm) { setCpError('All fields are required.'); return; }
-                    if (cpNew !== cpConfirm) { setCpError('New passwords do not match.'); return; }
+                  <div className="pt-2">
+                    <div className={`text-sm text-red-500 transition-all duration-200 ${cpError ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-2'}`} aria-live="polite">{cpError}</div>
+                  </div>
 
-                    // First try local storage change for local accounts
-                    try {
-                      const users = storage.getUsers();
-                      const idx = users.findIndex(u => u.email === user?.email);
-                      if (idx !== -1 && users[idx].password === cpOld) {
-                        users[idx].password = cpNew;
-                        storage.setUsers(users);
-                        setChangePwOpen(false);
-                        setSuccessMessage('Password changed successfully');
-                        setTimeout(() => setSuccessMessage(null), 3500);
-                        return;
-                      }
-                    } catch (err) {
-                      console.error('Local password update error:', err);
-                      // continue to try Supabase if available
-                    }
+                  <div className="flex flex-col sm:flex-row items-center gap-3 justify-end pt-2 w-full">
+                    <Button variant="ghost" onClick={() => { if (!cpProcessing) setChangePwOpen(false); }} type="button" className="w-full sm:w-auto" disabled={cpProcessing}>Cancel</Button>
+                    <Button onClick={handleChangePassword} type="button" className="w-full sm:w-auto" disabled={cpProcessing}>{cpProcessing ? 'Updating…' : 'Save'}</Button>
+                  </div>
+                </form>
+              </Card>
+            </div>
+          </div>
+        </div>
+      )}
 
-                    // Otherwise, attempt Supabase update for authenticated users
-                    try {
-                      if (supabase && supabase.auth) {
-                        // Attempt modern API first
-                        if (typeof (supabase.auth as any).updateUser === 'function') {
-                          const { data, error } = await (supabase.auth as any).updateUser({ password: cpNew });
-                          if (error) { setCpError('Failed to update password.'); console.error('Supabase updateUser error:', error); return; }
-                          setChangePwOpen(false);
-                          setSuccessMessage('Password changed successfully');
-                          setTimeout(() => setSuccessMessage(null), 3500);
-                          return;
-                        } else if (typeof (supabase.auth as any).update === 'function') {
-                          const { data, error } = await (supabase.auth as any).update({ password: cpNew });
-                          if (error) { setCpError('Failed to update password.'); console.error('Supabase update error:', error); return; }
-                          setChangePwOpen(false);
-                          setSuccessMessage('Password changed successfully');
-                          setTimeout(() => setSuccessMessage(null), 3500);
-                          return;
-                        }
-                      }
-                      setCpError('Password update is not available in this environment.');
-                    } catch (err) {
-                      console.error('Supabase password update error:', err);
-                      setCpError('Failed to update password.');
-                    }
-
-                  }}>Save</Button>
-                </div>
-              </div>
-            </Card>
+      {/* Toast */}
+      {toast && (
+        <div className="fixed right-6 bottom-6 z-60">
+          <div className={`px-4 py-3 rounded-2xl shadow-lg animate-fade-in-up flex items-center gap-4 ${toast.type === 'success' ? 'bg-blue-600 text-white' : toast.type === 'error' ? 'bg-red-600 text-white' : 'bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-gray-100'}`}>
+            <div className="font-semibold">{toast.message}</div>
+            {toast.actionLabel && toast.action && (
+              <button onClick={() => { try { toast.action && toast.action(); } catch (e) { console.error(e); } }} className={`ml-2 px-3 py-1 rounded-md font-semibold ${toast.type === 'success' ? 'bg-white text-blue-600' : toast.type === 'error' ? 'bg-white text-red-600' : 'bg-blue-600 text-white'}`}>
+                {toast.actionLabel}
+              </button>
+            )}
           </div>
         </div>
       )}
 
       <main className="pb-24 pt-4">
-        {page === 'auth' && <AuthPage onAuthSuccess={handleAuthSuccess} onGuestMode={() => { setIsGuest(true); setPage('dashboard'); }} />}
+        {page === 'auth' && <AuthPage onAuthSuccess={handleAuthSuccess} onGuestMode={() => { setIsGuest(true); setPage('dashboard'); }} showToast={(t: any) => setToast(t)} /> }
 
         {page === 'reset' && (
           <div className="min-h-screen flex items-center justify-center p-6">
@@ -1367,8 +1645,8 @@ const App = () => {
                           setResetPageError('Password update is not available in this environment.'); setResetPageProcessing(false); return;
                         }
 
-                        setSuccessMessage('Password reset successfully');
-                        setTimeout(() => setSuccessMessage(null), 3500);
+                        setToast({ type: 'success', message: 'Password reset successfully' });
+                        setTimeout(() => setToast(null), 3500);
                         setPage('auth');
                       } else {
                         setResetPageError('Password reset is not available in this environment.');
@@ -1387,9 +1665,10 @@ const App = () => {
         
         {page === 'dashboard' && (
           <Dashboard 
-            user={user} scans={currentScans} isGuest={isGuest} role={role} setRole={setRole} 
+            user={user} scans={currentScans} isGuest={isGuest} role={role} setRole={setRole} setUser={setUser}
             onNewScan={() => setPage('upload')} onViewScan={(s: any) => { setActiveScan(s); setPage('results'); }} 
             onAuthRequired={() => setPage('auth')} onTriggerUpgrade={triggerUpgrade}
+            showToast={(t: any) => setToast(t)}
           />
         )}
 
@@ -1431,7 +1710,8 @@ const App = () => {
                   }
 
                   if (!confirmed) {
-                    alert('Please verify your email to continue.');
+                    setToast({ type: 'info', message: 'Please verify your email to continue.' });
+                    setTimeout(() => setToast(null), 3500);
                     return;
                   }
                 } catch (err) {
@@ -1520,7 +1800,7 @@ const App = () => {
                   <h3 className="font-extrabold text-2xl flex items-center gap-3 mt-10"><Zap className="w-7 h-7 text-amber-500" /> Missing High-Impact Keywords</h3>
                   <div className="flex flex-wrap gap-2 pt-2">
                     {activeScan?.insights.missingKeywords?.map((k, i) => (
-                        <span key={i} className="px-4 py-2 bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-400 text-xs font-black rounded-xl border border-amber-100 dark:border-amber-900/30 shadow-sm">
+                        <span key={i} className="px-4 py-2 bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-400 text-xs font-black rounded-2xl border border-amber-100 dark:border-amber-900/30 shadow-sm">
                             {k}
                         </span>
                     ))}
