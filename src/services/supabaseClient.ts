@@ -540,6 +540,7 @@ if (isSupabaseConfigured && supabase.auth && typeof (supabase.auth as any).onAut
   } catch (err) {
     // Registration failure should not break app
     console.error('Failed to register onAuthStateChange listener:', err);
-    await logAppError('registerAuthListener', err);
+    // Fire-and-forget logging to avoid top-level await in module scope
+    void logAppError('registerAuthListener', err);
   }
 }
