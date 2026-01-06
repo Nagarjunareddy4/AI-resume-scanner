@@ -80,3 +80,20 @@ TEST_USER_EMAIL=alice@example.com npm run supabase:read-test
 
 
 *ResuScan AI is built to provide enterprise-grade screening accuracy with a focus on candidate privacy and recruiter efficiency. © 2024 Nagarjuna Reddy. All rights reserved.*
+
+---
+
+## Enabling Supabase persistence (optional, developer)
+
+To enable Supabase-backed persistence for users, auth logs, and app errors, set these environment variables locally or in your CI environment:
+
+- `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` (required at runtime)
+- `SUPABASE_DB_URL` or `DATABASE_URL` (required to run the DB setup script that creates the tables)
+
+A helper script is provided to create the required tables if they do not already exist. Run it like:
+
+```bash
+SUPABASE_DB_URL=postgres://user:pass@host:port/dbname npm run db:setup
+```
+
+This will create tables: `users`, `auth_logs`, and `app_errors` when they are missing.
